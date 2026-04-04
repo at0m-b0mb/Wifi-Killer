@@ -361,7 +361,7 @@ class _Sidebar(ctk.CTkFrame):
         ("network_map",  "🗺️   Network Map"),
         ("multi_subnet", "🌐  Multi-Subnet"),
         ("dns_sniffer",  "🔎  DNS Sniffer"),
-        ("arp_cache",    "🗂️   ARP Cache"),
+        ("arp_cache",    "📋  ARP Cache"),
         ("throttle",     "🚦  Speed Control"),
         ("ping_monitor", "🏓  Ping Monitor"),
         ("attack",       "⚡  ARP Attack"),
@@ -961,6 +961,73 @@ class ScanFrame(ctk.CTkFrame):
             self._app.log(f"Results exported to {path}", "ok")
         except Exception as exc:
             messagebox.showerror("Export Error", str(exc))
+
+    # ── Import hosts ──────────────────────────────────────────────────
+
+    def _import_hosts(self) -> None:
+        """Load hosts from a CSV, JSON, or plain-text file (one IP per line)."""
+        path = filedialog.askopenfilename(
+            filetypes=[
+                ("All supported", "*.csv *.json *.txt"),
+                ("CSV file", "*.csv"),
+                ("JSON file", "*.json"),
+                ("Text file", "*.txt"),
+                ("All files", "*.*"),
+            ],
+            title="Import hosts",
+        )
+        if not path:
+            return
+        try:
+            hosts: list[dict] = []
+            if path.endswith(".json"):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    hosts = data
+                else:
+                    messagebox.showerror("Import Error", "JSON file must contain a list of host objects.")
+                    return
+            elif path.endswith(".csv"):
+                with open(path, "r", encoding="utf-8", newline="") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        hosts.append(dict(row))
+            else:
+                # Plain text – one IP per line
+                with open(path, "r", encoding="utf-8") as f:
+                    for raw_line in f:
+                        ip = raw_line.strip()
+                        if ip and _validate_ip(ip):
+                            hosts.append({"ip": ip, "mac": "—", "vendor": "—",
+                                          "hostname": "—", "type": "unknown",
+                                          "open_ports": [], "ping": False})
+
+            if not hosts:
+                messagebox.showinfo("Import", "No valid hosts found in the file.")
+                return
+
+            # Normalise keys – ensure every record has the expected fields
+            normalised: list[dict] = []
+            for h in hosts:
+                normalised.append({
+                    "ip":         h.get("ip", "?.?.?.?"),
+                    "mac":        h.get("mac", "—"),
+                    "vendor":     h.get("vendor", "—"),
+                    "hostname":   h.get("hostname", "—"),
+                    "type":       h.get("type", "unknown"),
+                    "open_ports": h.get("open_ports", []),
+                    "ping":       h.get("ping", False),
+                })
+
+            self._app._hosts = normalised
+            self._populate_table(normalised)
+            self._app.log(f"Imported {len(normalised)} host(s) from {os.path.basename(path)}", "ok")
+
+        except json.JSONDecodeError as exc:
+            messagebox.showerror("Import Error", f"Invalid JSON:\n{exc}")
+        except Exception as exc:
+            messagebox.showerror("Import Error", str(exc))
 
     # ── Attack shortcut ───────────────────────────────────────────────
 
@@ -3421,11 +3488,15 @@ class WolFrame(ctk.CTkFrame):
 
 
 # ===========================================================================
+# About Frame
+# ===========================================================================
+
+# ===========================================================================
 # DNS Sniffer Frame
 # ===========================================================================
 
 class DnsSnifferFrame(ctk.CTkFrame):
-    """Live DNS query sniffer panel."""
+    """GUI panel for capturing and displaying DNS queries in real time."""
 
     def __init__(self, parent, app: WifiKillerApp) -> None:
         super().__init__(parent, fg_color=_CLR_BG, corner_radius=0)
@@ -3442,43 +3513,43 @@ class DnsSnifferFrame(ctk.CTkFrame):
         ctk.CTkLabel(
             self, text="🔎  DNS Sniffer",
             font=_FONT_TITLE, text_color=_CLR_ACCENT,
-        ).grid(row=0, column=0, padx=28, pady=(22, 2), sticky="w")
+        ).grid(row=0, column=0, padx=28, pady=(24, 4), sticky="w")
 
         ctk.CTkLabel(
             self,
-            text="Capture DNS queries to see which domains devices are resolving. "
-                 "Requires an active MITM or monitor mode.",
+            text="Capture DNS queries flowing through the network (requires active MITM or monitor mode).",
             font=_FONT_SMALL, text_color=_CLR_MUTED,
-        ).grid(row=1, column=0, padx=28, pady=(0, 10), sticky="w")
+        ).grid(row=1, column=0, padx=28, pady=(0, 12), sticky="w")
 
         # Controls
         ctrl = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
         ctrl.grid(row=2, column=0, sticky="ew", padx=24, pady=(0, 10))
 
         self._start_btn = ctk.CTkButton(
-            ctrl, text="▶  Start Sniffing", fg_color=_CLR_ACCENT,
-            hover_color="#c73652", font=_FONT_LABEL, width=150,
-            command=self._toggle_sniffer,
+            ctrl, text="▶  Start Capture", width=150,
+            fg_color=_CLR_ACCENT, hover_color="#c73652",
+            font=_FONT_LABEL, command=self._toggle,
         )
-        self._start_btn.pack(side="left", padx=(16, 8), pady=12)
+        self._start_btn.grid(row=0, column=0, padx=(16, 8), pady=12)
 
         ctk.CTkButton(
-            ctrl, text="🗑  Clear", fg_color=_CLR_PANEL,
-            hover_color=_CLR_DANGER, font=_FONT_LABEL, width=80,
-            command=self._clear,
-        ).pack(side="left", padx=(0, 8), pady=12)
+            ctrl, text="🗑  Clear", width=90,
+            fg_color=_CLR_PANEL, hover_color=_CLR_DANGER,
+            font=_FONT_LABEL, command=self._clear,
+        ).grid(row=0, column=1, padx=(0, 8), pady=12)
 
         ctk.CTkButton(
-            ctrl, text="💾  Export CSV", fg_color=_CLR_PANEL,
-            hover_color="#1a4a80", font=_FONT_LABEL, width=120,
-            command=self._export,
-        ).pack(side="left", padx=(0, 8), pady=12)
+            ctrl, text="💾  Export CSV", width=120,
+            fg_color=_CLR_PANEL, hover_color=_CLR_ACCENT2,
+            font=_FONT_LABEL, command=self._export,
+        ).grid(row=0, column=2, padx=(0, 16), pady=12)
 
         self._count_label = ctk.CTkLabel(
             ctrl, text="0 queries captured", font=_FONT_SMALL, text_color=_CLR_MUTED)
-        self._count_label.pack(side="right", padx=16, pady=12)
+        self._count_label.grid(row=0, column=3, padx=16, pady=12, sticky="e")
+        ctrl.grid_columnconfigure(3, weight=1)
 
-        # Table
+        # DNS query table
         tbl = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
         tbl.grid(row=3, column=0, sticky="nsew", padx=24, pady=(0, 20))
         tbl.grid_rowconfigure(1, weight=1)
@@ -3486,45 +3557,50 @@ class DnsSnifferFrame(ctk.CTkFrame):
 
         hdr = ctk.CTkFrame(tbl, fg_color=_CLR_PANEL, corner_radius=0)
         hdr.grid(row=0, column=0, sticky="ew")
-        for ci, col in enumerate(("Timestamp", "Source IP", "Domain", "Query Type")):
-            ctk.CTkLabel(hdr, text=col,
-                         font=("Segoe UI", 10, "bold"),
+        for ci, col in enumerate(("Timestamp", "Source IP", "Domain", "Type")):
+            ctk.CTkLabel(hdr, text=col, font=("Segoe UI", 10, "bold"),
                          text_color=_CLR_ACCENT, anchor="w").grid(
                 row=0, column=ci, padx=(14 if ci == 0 else 8, 4), pady=8, sticky="w")
         hdr.grid_columnconfigure(2, weight=1)
 
-        self._tbl_body = ctk.CTkScrollableFrame(
-            tbl, fg_color=_CLR_BG, corner_radius=0)
+        self._tbl_body = ctk.CTkScrollableFrame(tbl, fg_color=_CLR_BG, corner_radius=0)
         self._tbl_body.grid(row=1, column=0, sticky="nsew")
         self._tbl_body.grid_columnconfigure(0, weight=1)
 
-        self._displayed_count = 0
+        self._row_count = 0
+        self.grid_rowconfigure(3, weight=1)
 
-    def _toggle_sniffer(self) -> None:
+    def _toggle(self) -> None:
         if self._running:
-            self._stop_sniffer()
+            self._stop()
         else:
-            self._start_sniffer()
+            self._start()
 
-    def _start_sniffer(self) -> None:
+    def _start(self) -> None:
         try:
             from wifi_killer.modules.dns_sniffer import DnsSniffer
         except ImportError:
-            messagebox.showerror("Module Error", "DNS sniffer module not available.")
+            messagebox.showerror("Missing Module", "DNS Sniffer module not available.")
             return
+
         iface = self._app._iface or None
         self._sniffer = DnsSniffer(iface=iface)
-        self._sniffer.start()
+        try:
+            self._sniffer.start()
+        except Exception as exc:
+            messagebox.showerror("Sniffer Error", str(exc))
+            return
+
         self._running = True
-        self._start_btn.configure(text="⏹  Stop Sniffing", fg_color=_CLR_DANGER)
+        self._start_btn.configure(text="⏹  Stop Capture", fg_color=_CLR_DANGER)
         self._app.log("DNS sniffer started.", "ok")
         self._schedule_refresh()
 
-    def _stop_sniffer(self) -> None:
+    def _stop(self) -> None:
         if self._sniffer:
             self._sniffer.stop()
         self._running = False
-        self._start_btn.configure(text="▶  Start Sniffing", fg_color=_CLR_ACCENT)
+        self._start_btn.configure(text="▶  Start Capture", fg_color=_CLR_ACCENT)
         if self._refresh_id:
             self.after_cancel(self._refresh_id)
             self._refresh_id = None
@@ -3534,41 +3610,49 @@ class DnsSnifferFrame(ctk.CTkFrame):
         if not self._running:
             return
         self._refresh_table()
-        self._refresh_id = self.after(1000, self._schedule_refresh)
+        self._refresh_id = self.after(2000, self._schedule_refresh)
 
     def _refresh_table(self) -> None:
         if not self._sniffer:
             return
         queries = self._sniffer.queries
         new_count = len(queries)
-        self._count_label.configure(text=f"{new_count} queries captured")
+        if new_count <= self._row_count:
+            self._count_label.configure(text=f"{new_count} queries captured")
+            return
 
-        # Only add new rows
-        for i in range(self._displayed_count, new_count):
-            q = queries[i]
-            bg = _CLR_ROW_ODD if i % 2 == 0 else _CLR_ROW_EVEN
+        for q in queries[self._row_count:]:
+            idx = self._row_count
+            bg = _CLR_ROW_ODD if idx % 2 == 0 else _CLR_ROW_EVEN
             row = ctk.CTkFrame(self._tbl_body, fg_color=bg, corner_radius=6)
-            row.pack(fill="x", padx=4, pady=1)
-            for ci, val in enumerate([
-                q.get("timestamp", ""),
-                q.get("src_ip", ""),
-                q.get("domain", ""),
-                q.get("query_type", ""),
+            row.grid(row=idx, column=0, sticky="ew", padx=4, pady=1)
+            row.grid_columnconfigure(2, weight=1)
+
+            ts = q.get("timestamp", "")
+            if "T" in ts:
+                ts = ts.split("T")[1][:8]
+
+            for ci, (val, w) in enumerate([
+                (ts, 90),
+                (q.get("src_ip", ""), 130),
+                (q.get("domain", ""), 0),
+                (q.get("query_type", ""), 60),
             ]):
                 ctk.CTkLabel(
-                    row, text=str(val), font=_FONT_LABEL,
+                    row, text=val, font=_FONT_MONO,
                     text_color=_CLR_SUCCESS if ci == 2 else _CLR_TEXT,
-                    anchor="w",
-                ).grid(row=0, column=ci, padx=(14 if ci == 0 else 8, 4), pady=6, sticky="w")
-            row.grid_columnconfigure(2, weight=1)
-        self._displayed_count = new_count
+                    anchor="w", **({"width": w} if w else {}),
+                ).grid(row=0, column=ci, padx=(14 if ci == 0 else 4, 4), pady=6, sticky="w")
+            self._row_count += 1
+
+        self._count_label.configure(text=f"{new_count} queries captured")
 
     def _clear(self) -> None:
         if self._sniffer:
             self._sniffer.clear()
         for w in self._tbl_body.winfo_children():
             w.destroy()
-        self._displayed_count = 0
+        self._row_count = 0
         self._count_label.configure(text="0 queries captured")
 
     def _export(self) -> None:
@@ -3578,7 +3662,7 @@ class DnsSnifferFrame(ctk.CTkFrame):
         path = filedialog.asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("CSV file", "*.csv"), ("All files", "*.*")],
-            title="Export DNS Queries",
+            title="Export DNS queries",
         )
         if not path:
             return
@@ -3594,7 +3678,7 @@ class DnsSnifferFrame(ctk.CTkFrame):
 # ===========================================================================
 
 class ArpCacheFrame(ctk.CTkFrame):
-    """ARP cache viewer with poisoning detection."""
+    """GUI panel for viewing the system ARP cache and detecting poisoning."""
 
     def __init__(self, parent, app: WifiKillerApp) -> None:
         super().__init__(parent, fg_color=_CLR_BG, corner_radius=0)
@@ -3608,41 +3692,42 @@ class ArpCacheFrame(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
-            self, text="🗂️  ARP Cache Viewer",
+            self, text="📋  ARP Cache Viewer",
             font=_FONT_TITLE, text_color=_CLR_ACCENT,
-        ).grid(row=0, column=0, padx=28, pady=(22, 2), sticky="w")
+        ).grid(row=0, column=0, padx=28, pady=(24, 4), sticky="w")
 
         ctk.CTkLabel(
             self,
-            text="View the system ARP table and detect potential ARP poisoning.",
+            text="View the system ARP table and detect potential ARP cache poisoning.",
             font=_FONT_SMALL, text_color=_CLR_MUTED,
-        ).grid(row=1, column=0, padx=28, pady=(0, 10), sticky="w")
+        ).grid(row=1, column=0, padx=28, pady=(0, 12), sticky="w")
 
         # Controls
         ctrl = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
         ctrl.grid(row=2, column=0, sticky="ew", padx=24, pady=(0, 10))
 
         ctk.CTkButton(
-            ctrl, text="🔄  Refresh", fg_color=_CLR_ACCENT,
-            hover_color="#c73652", font=_FONT_LABEL, width=120,
-            command=self._refresh,
-        ).pack(side="left", padx=(16, 8), pady=12)
+            ctrl, text="🔄  Refresh", width=110,
+            fg_color=_CLR_ACCENT, hover_color="#c73652",
+            font=_FONT_LABEL, command=self._refresh,
+        ).grid(row=0, column=0, padx=(16, 8), pady=12)
 
-        self._auto_var = tk.BooleanVar(value=False)
+        self._auto_var = tk.BooleanVar(value=True)
         ctk.CTkCheckBox(
             ctrl, text="Auto-refresh (5s)", variable=self._auto_var,
-            font=_FONT_LABEL, command=self._toggle_auto_refresh,
-        ).pack(side="left", padx=(0, 16), pady=12)
+            font=_FONT_LABEL, command=self._toggle_auto,
+        ).grid(row=0, column=1, padx=(0, 16), pady=12)
 
         self._count_label = ctk.CTkLabel(
             ctrl, text="", font=_FONT_SMALL, text_color=_CLR_MUTED)
-        self._count_label.pack(side="left", padx=8, pady=12)
+        self._count_label.grid(row=0, column=2, padx=16, pady=12, sticky="e")
+        ctrl.grid_columnconfigure(2, weight=1)
 
-        self._warning_label = ctk.CTkLabel(
+        self._warn_label = ctk.CTkLabel(
             ctrl, text="", font=_FONT_LABEL, text_color=_CLR_DANGER)
-        self._warning_label.pack(side="right", padx=16, pady=12)
+        self._warn_label.grid(row=0, column=3, padx=(0, 16), pady=12)
 
-        # Table
+        # ARP table
         tbl = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
         tbl.grid(row=3, column=0, sticky="nsew", padx=24, pady=(0, 20))
         tbl.grid_rowconfigure(1, weight=1)
@@ -3650,17 +3735,29 @@ class ArpCacheFrame(ctk.CTkFrame):
 
         hdr = ctk.CTkFrame(tbl, fg_color=_CLR_PANEL, corner_radius=0)
         hdr.grid(row=0, column=0, sticky="ew")
-        for ci, col in enumerate(("IP Address", "MAC Address", "State", "Interface", "Status")):
-            ctk.CTkLabel(hdr, text=col,
-                         font=("Segoe UI", 10, "bold"),
+        for ci, col in enumerate(("IP Address", "MAC Address", "State", "Interface")):
+            ctk.CTkLabel(hdr, text=col, font=("Segoe UI", 10, "bold"),
                          text_color=_CLR_ACCENT, anchor="w").grid(
                 row=0, column=ci, padx=(14 if ci == 0 else 8, 4), pady=8, sticky="w")
-        hdr.grid_columnconfigure(4, weight=1)
+        hdr.grid_columnconfigure(3, weight=1)
 
-        self._tbl_body = ctk.CTkScrollableFrame(
-            tbl, fg_color=_CLR_BG, corner_radius=0)
+        self._tbl_body = ctk.CTkScrollableFrame(tbl, fg_color=_CLR_BG, corner_radius=0)
         self._tbl_body.grid(row=1, column=0, sticky="nsew")
         self._tbl_body.grid_columnconfigure(0, weight=1)
+
+        self._toggle_auto()
+
+    def _toggle_auto(self) -> None:
+        if self._auto_refresh_id:
+            self.after_cancel(self._auto_refresh_id)
+            self._auto_refresh_id = None
+        if self._auto_var.get():
+            self._auto_loop()
+
+    def _auto_loop(self) -> None:
+        self._refresh()
+        if self._auto_var.get():
+            self._auto_refresh_id = self.after(5000, self._auto_loop)
 
     def _refresh(self) -> None:
         try:
@@ -3670,64 +3767,50 @@ class ArpCacheFrame(ctk.CTkFrame):
             return
 
         entries = read_arp_cache()
-        suspicious = detect_poisoning(entries)
+        poisoned = detect_poisoning(entries)
 
-        # Build set of suspicious MACs for highlighting
-        suspicious_macs = set()
-        for s in suspicious:
-            suspicious_macs.add(s["mac"].upper())
+        # Build set of IPs involved in poisoning
+        poisoned_ips: set[str] = set()
+        for p in poisoned:
+            poisoned_ips.update(p.get("ips", []))
 
-        # Clear table
+        # Clear and rebuild table
         for w in self._tbl_body.winfo_children():
             w.destroy()
 
-        self._count_label.configure(text=f"{len(entries)} ARP entries")
-
-        if suspicious:
-            warnings = "; ".join(s["warning"] for s in suspicious[:3])
-            self._warning_label.configure(
-                text=f"⚠  Potential poisoning: {warnings}")
-        else:
-            self._warning_label.configure(text="✓ No poisoning detected")
-
         for i, entry in enumerate(entries):
-            mac_upper = entry.get("mac", "").upper()
-            is_suspicious = mac_upper in suspicious_macs
-            bg = _CLR_DANGER if is_suspicious else (
-                _CLR_ROW_ODD if i % 2 == 0 else _CLR_ROW_EVEN)
-
+            is_poisoned = entry.get("ip") in poisoned_ips
+            bg = _CLR_DANGER if is_poisoned else (_CLR_ROW_ODD if i % 2 == 0 else _CLR_ROW_EVEN)
             row = ctk.CTkFrame(self._tbl_body, fg_color=bg, corner_radius=6)
-            row.pack(fill="x", padx=4, pady=1)
+            row.grid(row=i, column=0, sticky="ew", padx=4, pady=1)
+            row.grid_columnconfigure(3, weight=1)
 
-            status = "⚠  SUSPICIOUS" if is_suspicious else "OK"
-            for ci, val in enumerate([
-                entry.get("ip", ""),
-                entry.get("mac", ""),
-                entry.get("state", ""),
-                entry.get("interface", ""),
-                status,
+            for ci, (val, w) in enumerate([
+                (entry.get("ip", ""), 140),
+                (entry.get("mac", ""), 160),
+                (entry.get("state", ""), 110),
+                (entry.get("interface", ""), 0),
             ]):
-                color = _CLR_DANGER if is_suspicious and ci == 4 else (
-                    _CLR_SUCCESS if ci == 0 else _CLR_TEXT)
+                text_color = _CLR_TEXT
+                if is_poisoned and ci == 1:
+                    text_color = _CLR_WARNING
+                elif ci == 0:
+                    text_color = _CLR_SUCCESS
+
                 ctk.CTkLabel(
-                    row, text=str(val), font=_FONT_LABEL,
-                    text_color=color, anchor="w",
-                ).grid(row=0, column=ci, padx=(14 if ci == 0 else 8, 4), pady=6, sticky="w")
-            row.grid_columnconfigure(4, weight=1)
+                    row, text=val, font=_FONT_MONO,
+                    text_color=text_color, anchor="w",
+                    **({"width": w} if w else {}),
+                ).grid(row=0, column=ci, padx=(14 if ci == 0 else 4, 4), pady=6, sticky="w")
 
-    def _toggle_auto_refresh(self) -> None:
-        if self._auto_var.get():
-            self._auto_refresh_loop()
+        self._count_label.configure(text=f"{len(entries)} entries")
+
+        if poisoned:
+            macs = ", ".join(p.get("mac", "?") for p in poisoned)
+            self._warn_label.configure(
+                text=f"⚠  Possible ARP poisoning detected! Duplicate MACs: {macs}")
         else:
-            if self._auto_refresh_id:
-                self.after_cancel(self._auto_refresh_id)
-                self._auto_refresh_id = None
-
-    def _auto_refresh_loop(self) -> None:
-        if not self._auto_var.get():
-            return
-        self._refresh()
-        self._auto_refresh_id = self.after(5000, self._auto_refresh_loop)
+            self._warn_label.configure(text="")
 
 
 # ===========================================================================
@@ -3765,25 +3848,25 @@ class AboutFrame(ctk.CTkFrame):
             "📋  Copy All IPs to clipboard",
             "ℹ️   Host detail popup with live RTT ping and action shortcuts",
             "🌐  Multi-subnet scan – auto-detect & scan different network segments",
+            "🔎  DNS Sniffer – capture DNS queries during MITM sessions",
+            "📋  ARP Cache Viewer – view system ARP table, detect poisoning",
+            "📦  Packet Capture – save traffic to pcap for Wireshark analysis",
+            "📝  Session Logger – audit trail of all actions in JSON-lines format",
+            "🖥️   CLI: --version, --scan-only, report export, signal handling",
             "📡  Continuous network monitor with join/leave alerts",
-            "🔎  DNS query sniffer – live capture of DNS lookups during MITM",
-            "🗂️   ARP cache viewer with poisoning detection",
-            "📦  Packet capture with pcap export for Wireshark analysis",
-            "📝  Session audit logger – full JSON-lines trail of all actions",
             "⚡  ARP-spoofing: Full MITM · Client-cut · Gateway-cut",
             "🚦  Client speed control – per-IP download/upload throttle sliders",
             "🏓  Ping monitor – live RTT table for multiple hosts",
-            "🎭  MAC address anonymization (random / OUI-preserve / custom / restore)",
+            "🎭  MAC address anonymization (random / OUI-preserve / custom)",
             "🔆  Wake-on-LAN – send standard & SecureOn magic packets",
             "🧠  OS fingerprinting from TTL (Linux / Windows / Cisco)",
             "🏷️   Expanded device-type detection (Sonos, printers, game consoles, smart TV …)",
             "⚙️   Configurable attack speed with presets (aggressive / normal / stealth / paranoid)",
             "🌙  Dark / Light / System theme toggle",
-            "💾  Export scan results to CSV, JSON, or HTML reports",
+            "💾  Export scan results to CSV or JSON",
             "📄  Export activity log to text file",
             "📋  Colour-coded activity log with Clear button",
             "🖥️   Modern dark-themed GUI (CustomTkinter)",
-            "🖥️   CLI with --version, --scan-only, and report export flags",
         ]
 
         for feat in features:

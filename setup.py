@@ -8,7 +8,7 @@ setup(
         "host discovery, ARP-based MITM, device identification, "
         "and MAC anonymisation."
     ),
-    long_description=open("README.md").read(),
+    long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     author="at0m-b0mb",
     license="MIT",
@@ -18,6 +18,7 @@ setup(
     install_requires=[
         "scapy>=2.5.0",
         "dnspython>=2.3.0",
+        "customtkinter>=5.2.0",
     ],
     entry_points={
         "console_scripts": [
@@ -30,6 +31,8 @@ setup(
         "Intended Audience :: Education",
         "License :: OSI Approved :: MIT License",
         "Operating System :: POSIX :: Linux",
+        "Operating System :: MacOS",
+        "Operating System :: Microsoft :: Windows",
         "Programming Language :: Python :: 3",
         "Topic :: Security",
     ],

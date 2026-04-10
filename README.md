@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue?style=flat-square&logo=python)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Linux-orange?style=flat-square&logo=linux)](https://kernel.org)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-orange?style=flat-square)](https://github.com/at0m-b0mb/Wifi-Killer)
 [![GUI](https://img.shields.io/badge/GUI-CustomTkinter-purple?style=flat-square)](https://github.com/TomSchimansky/CustomTkinter)
 
 > ⚠️ **For educational and authorised lab/CTF use only.**  
@@ -18,26 +18,26 @@
 
 ## ✨ Features
 
-| Feature | CLI | GUI |
-|---|---|---|
-| 📊 **Live dashboard** with stat cards and recent-device feed | ❌ | ✅ |
-| 🔍 **Fast ARP host discovery** | ✅ | ✅ |
-| 🔍 **Balanced scan (ARP + ICMP)** | ✅ | ✅ |
-| 🔍 **Stealth TCP SYN scan** | ✅ | ✅ |
-| 🔎 **Real-time search & filter** across the host table | ❌ | ✅ |
-| ℹ️ **Host detail popup** with live RTT ping & action shortcuts | ❌ | ✅ |
-| 🌐 **Multi-subnet scan** (auto-detect all network segments) | ✅ | ✅ |
-| 📡 **Continuous network monitor** (join/leave alerts) | ✅ | ✅ |
-| 🏷️ **Device identification** (vendor, hostname, type) | ✅ | ✅ |
-| ⚡ **Full MITM** ARP-spoof (bi-directional) | ✅ | ✅ |
-| ⚡ **Client-cut / Gateway-cut** ARP-spoof | ✅ | ✅ |
-| 🚦 **Client speed control** (download/upload sliders via `tc` HTB) | ❌ | ✅ |
-| 🏓 **Ping Monitor** – live RTT table for multiple hosts | ❌ | ✅ |
-| 🎭 **MAC address anonymization** (random / OUI-preserve / custom) | ✅ | ✅ |
-| ⚙️ **Attack speed presets** (aggressive / normal / stealth) | ✅ | ✅ |
-| 💾 **Export scan results** to CSV or JSON | ❌ | ✅ |
-| 📋 **Colour-coded activity log** | ❌ | ✅ |
-| 🖥️ **Modern dark-themed GUI** | ❌ | ✅ |
+| Feature | CLI | GUI | Linux | macOS | Windows |
+|---|---|---|---|---|---|
+| 📊 **Live dashboard** with stat cards and recent-device feed | ❌ | ✅ | ✅ | ✅ | ✅ |
+| 🔍 **Fast ARP host discovery** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 🔍 **Balanced scan (ARP + ICMP)** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 🔍 **Stealth TCP SYN scan** | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 🔎 **Real-time search & filter** across the host table | ❌ | ✅ | ✅ | ✅ | ✅ |
+| ℹ️ **Host detail popup** with live RTT ping & action shortcuts | ❌ | ✅ | ✅ | ✅ | ✅ |
+| 🌐 **Multi-subnet scan** (auto-detect all network segments) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 📡 **Continuous network monitor** (join/leave alerts) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 🏷️ **Device identification** (vendor, hostname, type) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| ⚡ **Full MITM** ARP-spoof (bi-directional) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| ⚡ **Client-cut / Gateway-cut** ARP-spoof | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 🚦 **Client speed control** (via `tc` HTB) | ❌ | ✅ | ✅ | ❌ | ❌ |
+| 🏓 **Ping Monitor** – live RTT table for multiple hosts | ❌ | ✅ | ✅ | ✅ | ✅ |
+| 🎭 **MAC address anonymization** | ✅ | ✅ | ✅ | ✅ | ❌ |
+| ⚙️ **Attack speed presets** (aggressive / normal / stealth) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| 💾 **Export scan results** to CSV or JSON | ❌ | ✅ | ✅ | ✅ | ✅ |
+| 📋 **Colour-coded activity log** | ❌ | ✅ | ✅ | ✅ | ✅ |
+| 🖥️ **Modern dark-themed GUI** | ❌ | ✅ | ✅ | ✅ | ✅ |
 
 ---
 
@@ -48,9 +48,9 @@ The GUI is built with [CustomTkinter](https://github.com/TomSchimansky/CustomTki
 **Panels:**
 - **Scan Network** – Run scans, view live host table, export results, launch monitor mode
 - **Multi-Subnet** – Auto-detect all network segments, manage CIDR checklist, parallel scan
-- **Speed Control** – Throttle a client's download/upload speed with sliders (`tc` HTB)
+- **Speed Control** – Throttle a client's download/upload speed with sliders (`tc` HTB, Linux only)
 - **ARP Attack** – Configure & launch ARP-spoofing attacks with real-time status
-- **MAC Anonymize** – Randomize or set a custom MAC address on your interface
+- **MAC Anonymize** – Randomize or set a custom MAC address on your interface (Linux & macOS)
 - **Settings** – Apply attack-speed presets or configure manually
 - **About** – Feature list and usage disclaimer
 
@@ -60,10 +60,14 @@ The GUI is built with [CustomTkinter](https://github.com/TomSchimansky/CustomTki
 
 ### Prerequisites
 
-- **Linux** (tested on Kali, Ubuntu, Debian)
-- **Python 3.9+**
-- **Root privileges** (required for raw socket / packet injection)
-- `scapy`, `customtkinter` (installed below)
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Python | 3.9+ | 3.9+ | 3.9+ |
+| Privileges | `sudo` / root | `sudo` / root | Run as Administrator |
+| Packet driver | built-in | built-in | [Npcap](https://npcap.com) *(required)* |
+| Extra tools | `iproute2` (usually pre-installed) | built-in `ifconfig`/`netstat` | built-in `ipconfig`/`route` |
+
+> **Windows:** Install [Npcap](https://npcap.com) before running — Scapy requires it for raw packet access.
 
 ### Installation
 
@@ -72,20 +76,34 @@ The GUI is built with [CustomTkinter](https://github.com/TomSchimansky/CustomTki
 git clone https://github.com/at0m-b0mb/Wifi-Killer.git
 cd Wifi-Killer
 
-# 2. Install dependencies
+# 2. Install Python dependencies
 pip install -r requirements.txt
 ```
 
 ### Launch – GUI (recommended)
 
 ```bash
+# Linux / macOS
 sudo python3 gui.py
+
+# Windows (run Command Prompt or PowerShell as Administrator)
+python gui.py
 ```
 
 ### Launch – CLI (interactive terminal)
 
 ```bash
+# Linux / macOS
 sudo python3 main.py
+
+# Windows (run as Administrator)
+python main.py
+```
+
+### Non-interactive scan (scripting / CI)
+
+```bash
+sudo python3 main.py --scan-only --iface eth0 --scan-type fast --export results.json
 ```
 
 ---
@@ -98,7 +116,7 @@ sudo python3 main.py
 2. **Scan Network tab** – choose a scan type and click *Start Scan*. Results appear in the live table with vendor, hostname, and device-type enrichment.
 3. **Select hosts** – tick the checkboxes next to the hosts you want to target, then click *Attack Selected*.
 4. **ARP Attack tab** – confirm the targets, pick a method, and click *Launch Attack*. Click *Stop & Restore* to cleanly reset ARP caches.
-5. **MAC Anonymize tab** – randomize your MAC before attacking to reduce traceability.
+5. **MAC Anonymize tab** – randomize your MAC before attacking to reduce traceability (Linux & macOS only).
 6. **Export** – save the scan results as CSV or JSON from the Scan tab.
 
 ### CLI Menu Map
@@ -106,10 +124,12 @@ sudo python3 main.py
 ```
 Main Menu
  ├─ 1. Host Discovery     → Fast / Balanced / Stealth / Continuous Monitor
- ├─ 2. ARP Attack         → Full MITM / Client-cut / Gateway-cut
- ├─ 3. Speed / Intensity  → Presets or manual config
- ├─ 4. MAC Anonymization  → Random / OUI-preserve / Custom / Restore
- └─ 5. Change interface
+ ├─ 2. Multi-Subnet Scan  → Auto-discover all reachable networks
+ ├─ 3. ARP Attack         → Full MITM / Client-cut / Gateway-cut
+ ├─ 4. Speed / Intensity  → Presets or manual config
+ ├─ 5. MAC Anonymization  → Random / OUI-preserve / Custom / Restore
+ ├─ 6. Export Scan Report → JSON / text / HTML
+ └─ 7. Change interface
 ```
 
 ---
@@ -137,9 +157,11 @@ ARP caches are **automatically restored** when you stop the attack.
 
 ---
 
-## 🚦 Client Speed Control
+## 🚦 Client Speed Control *(Linux only)*
 
-Throttle a specific client's internet speed while an ARP MITM attack is active.  Uses Linux **`tc` HTB** (Hierarchical Token Bucket) to shape traffic in both directions.
+Throttle a specific client's internet speed while an ARP MITM attack is active. Uses Linux **`tc` HTB** (Hierarchical Token Bucket) to shape traffic in both directions.
+
+> **Note:** Speed control requires the Linux `iproute2` package (`tc` command). It is **not available on macOS or Windows** — the ARP attack still works on those platforms, but per-IP bandwidth limiting is Linux-exclusive.
 
 | Preset | Download | Upload | Use-case |
 |---|---|---|---|
@@ -151,9 +173,7 @@ Throttle a specific client's internet speed while an ARP MITM attack is active. 
 | ⚡ **Full** | 100 Mbps | 100 Mbps | Restore normal speed |
 
 Or drag the sliders to any value between 0 and 100 Mbps.  
-Rules are removed cleanly (tc qdisc deleted) when you click **Clear All** or the app exits.
-
-> **Note:** Throttling only works when an ARP MITM attack is active so traffic actually flows through the attacker machine.  IP forwarding is enabled automatically when an attack starts.
+Rules are removed cleanly when you click **Clear All** or the app exits.
 
 ---
 
@@ -167,7 +187,7 @@ Rules are removed cleanly (tc qdisc deleted) when you click **Clear All** or the
 
 ---
 
-## 🎭 MAC Anonymization
+## 🎭 MAC Anonymization *(Linux & macOS)*
 
 ```
 Options
@@ -176,6 +196,8 @@ Options
  ├─ 3. Set a specific MAC manually
  └─ 4. Restore original MAC
 ```
+
+> **Windows:** Automatic MAC changing is not supported. Use [Technitium MAC Address Changer](https://technitium.com/tmac/) or change the `NetworkAddress` registry value manually.
 
 ---
 
@@ -193,12 +215,12 @@ Wifi-Killer/
 │   ├── modules/
 │   │   ├── scanner.py            # Host discovery (ARP / ICMP / TCP SYN / multi-subnet)
 │   │   ├── attacker.py           # ARP-spoof engine (MITM / cut-off)
-│   │   ├── throttler.py          # Bandwidth throttling via Linux tc HTB
-│   │   ├── anonymizer.py         # MAC address changer
+│   │   ├── throttler.py          # Bandwidth throttling via tc HTB (Linux only)
+│   │   ├── anonymizer.py         # MAC address changer (Linux & macOS)
 │   │   ├── identifier.py         # OUI lookup, hostname resolve, device-type guess
 │   │   └── config.py             # Attack speed config & presets
 │   ├── utils/
-│   │   └── network.py            # Gateway, MAC, subnet, route, multi-subnet helpers
+│   │   └── network.py            # Cross-platform gateway, MAC, subnet, route helpers
 │   └── data/
 │       └── oui.json              # OUI → vendor database
 └── tests/
@@ -231,4 +253,3 @@ The author assumes no liability for any misuse of this software.
 ## 📄 License
 
 MIT License – see [LICENSE](LICENSE) for details.
-

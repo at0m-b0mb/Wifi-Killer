@@ -1,8 +1,12 @@
 """
 modules/anonymizer.py – Module 5: Random MAC Address (Anonymization).
 
-Uses `ip link set dev <iface> address <mac>` to change the interface MAC.
-Requires root privileges.
+Platform support:
+  Linux   – uses ``ip link set dev <iface> address <mac>``
+  macOS   – uses ``ifconfig <iface> ether <mac>``
+  Windows – raises NotImplementedError (registry-level change not automated)
+
+Requires root / Administrator privileges.
 """
 
 from __future__ import annotations
@@ -10,10 +14,14 @@ from __future__ import annotations
 import random
 import re
 import subprocess
+import sys
 from typing import Optional
 
 from wifi_killer.utils.network import get_interface_mac
 
+_IS_LINUX = sys.platform.startswith("linux")
+_IS_MACOS = sys.platform == "darwin"
+_IS_WINDOWS = sys.platform == "win32"
 
 # ------------------------------------------------------------------ #
 # Original MAC tracking                                               #
@@ -40,27 +48,15 @@ def get_original_mac(iface: str) -> Optional[str]:
 # ------------------------------------------------------------------ #
 
 def _generate_random_mac(preserve_oui: bool = False, original_mac: str = "") -> str:
-    """Generate a random unicast, locally administered MAC address.
-
-    Args:
-        preserve_oui:   If True and *original_mac* is supplied, keep the
-                        first three octets (OUI) of the original MAC.
-        original_mac:   Original MAC string (used when preserve_oui=True).
-
-    Returns:
-        MAC string in 'AA:BB:CC:DD:EE:FF' format.
-    """
+    """Generate a random unicast, locally administered MAC address."""
     octets = [random.randint(0, 255) for _ in range(6)]
-    # Ensure unicast (bit 0 of first octet = 0) and locally administered
-    # (bit 1 of first octet = 1).
-    octets[0] = (octets[0] & 0xFE) | 0x02
+    octets[0] = (octets[0] & 0xFE) | 0x02  # unicast + locally administered
 
     if preserve_oui and original_mac:
         norm = re.sub(r"[^0-9A-Fa-f]", "", original_mac)
         if len(norm) >= 6:
             for i in range(3):
                 octets[i] = int(norm[i * 2 : i * 2 + 2], 16)
-            # Still mark LA bit even with original OUI
             octets[0] = (octets[0] & 0xFE) | 0x02
 
     return ":".join(f"{b:02X}" for b in octets)
@@ -82,10 +78,8 @@ def randomize_mac(
 ) -> str:
     """Change the MAC address of *iface* to *new_mac* (or a random one).
 
-    Brings the interface down, changes the MAC, then brings it back up.
-
     Args:
-        iface:        Network interface name (e.g. 'eth0', 'wlan0').
+        iface:        Network interface name (e.g. 'eth0', 'en0').
         new_mac:      Specific MAC to set; generated randomly if None.
         preserve_oui: Keep original vendor OUI when generating a random MAC.
 
@@ -93,8 +87,19 @@ def randomize_mac(
         The new MAC address string.
 
     Raises:
-        RuntimeError: If the operation fails or root privileges are missing.
+        RuntimeError:       If the operation fails or privileges are missing.
+        NotImplementedError: On Windows.
     """
+    if _IS_WINDOWS:
+        raise NotImplementedError(
+            "Automatic MAC address changing is not supported on Windows.\n"
+            "To change your MAC manually, use a tool like Technitium MAC "
+            "Address Changer (https://technitium.com/tmac/) or edit the "
+            "'NetworkAddress' registry value under:\n"
+            "  HKLM\\SYSTEM\\CurrentControlSet\\Control\\Class\\"
+            "{4D36E972-E325-11CE-BFC1-08002BE10318}\\<adapter-index>"
+        )
+
     _store_original(iface)
     original_mac = get_interface_mac(iface) or ""
 
@@ -107,32 +112,41 @@ def randomize_mac(
         raise ValueError(f"Invalid MAC address format: '{new_mac}'")
 
     try:
-        subprocess.check_call(
-            ["ip", "link", "set", "dev", iface, "down"],
-            timeout=5,
-        )
-        subprocess.check_call(
-            ["ip", "link", "set", "dev", iface, "address", new_mac.lower()],
-            timeout=5,
-        )
-        subprocess.check_call(
-            ["ip", "link", "set", "dev", iface, "up"],
-            timeout=5,
-        )
+        if _IS_LINUX:
+            subprocess.check_call(
+                ["ip", "link", "set", "dev", iface, "down"], timeout=5
+            )
+            subprocess.check_call(
+                ["ip", "link", "set", "dev", iface, "address", new_mac.lower()],
+                timeout=5,
+            )
+            subprocess.check_call(
+                ["ip", "link", "set", "dev", iface, "up"], timeout=5
+            )
+
+        elif _IS_MACOS:
+            # Bring interface down, set MAC, bring back up
+            subprocess.check_call(
+                ["ifconfig", iface, "down"], timeout=5
+            )
+            subprocess.check_call(
+                ["ifconfig", iface, "ether", new_mac.lower()], timeout=5
+            )
+            subprocess.check_call(
+                ["ifconfig", iface, "up"], timeout=5
+            )
+
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(
             f"Failed to change MAC on {iface}: {exc}. "
-            "Make sure you are running as root."
+            "Make sure you are running as root/sudo."
         ) from exc
 
     return new_mac
 
 
 def restore_mac(iface: str, original_mac: Optional[str] = None) -> None:
-    """Restore the original MAC address for *iface*.
-
-    Uses the stored original if *original_mac* is not provided.
-    """
+    """Restore the original MAC address for *iface*."""
     if original_mac is None:
         original_mac = get_original_mac(iface)
     if not original_mac:

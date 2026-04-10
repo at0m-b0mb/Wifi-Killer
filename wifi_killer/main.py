@@ -18,6 +18,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 _VERSION = "4.0.0"
 
+
+def _has_admin() -> bool:
+    """Return True if the process has root/Administrator privileges."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    else:
+        return os.geteuid() == 0
+
+
 from wifi_killer.modules.config import attack_config
 from wifi_killer.modules.identifier import identify_host, format_host
 from wifi_killer.utils.network import (
@@ -629,8 +642,12 @@ def main() -> None:
 
     print(_c(BANNER, _CYAN))
 
-    if os.geteuid() != 0:
-        _err("This tool requires root privileges. Please run with sudo.")
+    if not _has_admin():
+        _err(
+            "This tool requires elevated privileges.\n"
+            "  Linux/macOS : run with sudo\n"
+            "  Windows     : run as Administrator"
+        )
         sys.exit(1)
 
     # Non-interactive scan-only mode

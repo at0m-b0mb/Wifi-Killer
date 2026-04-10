@@ -19,10 +19,14 @@ that traffic is forwarded:
 Both directions are implemented as egress HTB classes on the outbound
 interface, which avoids the need for the more complex IFB redirect trick.
 
-Requirements
-------------
+Requirements (Linux only)
+-------------------------
 * Root / CAP_NET_ADMIN privileges
 * ``iproute2`` installed (``tc`` command)
+
+Note: Bandwidth throttling via tc is Linux-only.  On macOS and Windows,
+:class:`BandwidthThrottler` will raise ``NotImplementedError`` when
+``setup()`` is called.  IP forwarding helpers work on all platforms.
 
 Usage
 -----
@@ -37,8 +41,13 @@ Usage
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 from typing import Optional
+
+_IS_LINUX = sys.platform.startswith("linux")
+_IS_MACOS = sys.platform == "darwin"
+_IS_WINDOWS = sys.platform == "win32"
 
 
 # ---------------------------------------------------------------------------
@@ -51,42 +60,99 @@ def _run(cmd: list[str], check: bool = False) -> subprocess.CompletedProcess:
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        timeout=10,
+        timeout=5,
         check=check,
     )
 
 
+# ---------------------------------------------------------------------------
+# IP forwarding – cross-platform
+# ---------------------------------------------------------------------------
+
 def enable_ip_forward() -> None:
     """Enable IPv4 packet forwarding (required for MITM + throttling)."""
     try:
-        with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
-            f.write("1\n")
+        if _IS_LINUX:
+            with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
+                f.write("1\n")
+        elif _IS_MACOS:
+            subprocess.run(
+                ["sysctl", "-w", "net.inet.ip.forwarding=1"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        elif _IS_WINDOWS:
+            subprocess.run(
+                [
+                    "netsh", "interface", "ipv4",
+                    "set", "global", "forwarding=enabled",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,  # type: ignore[attr-defined]
+            )
     except Exception as exc:
-        import sys
-        print(f"[WARN] Could not enable IP forwarding: {exc}", file=sys.stderr)
+        import sys as _sys
+        print(f"[WARN] Could not enable IP forwarding: {exc}", file=_sys.stderr)
 
 
 def disable_ip_forward() -> None:
-    """Restore IPv4 forwarding to disabled (call only when nothing else needs it)."""
+    """Restore IPv4 forwarding to disabled."""
     try:
-        with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
-            f.write("0\n")
+        if _IS_LINUX:
+            with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
+                f.write("0\n")
+        elif _IS_MACOS:
+            subprocess.run(
+                ["sysctl", "-w", "net.inet.ip.forwarding=0"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        elif _IS_WINDOWS:
+            subprocess.run(
+                [
+                    "netsh", "interface", "ipv4",
+                    "set", "global", "forwarding=disabled",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,  # type: ignore[attr-defined]
+            )
     except Exception as exc:
-        import sys
-        print(f"[WARN] Could not disable IP forwarding: {exc}", file=sys.stderr)
+        import sys as _sys
+        print(f"[WARN] Could not disable IP forwarding: {exc}", file=_sys.stderr)
 
 
 def get_ip_forward() -> bool:
     """Return True if IPv4 forwarding is currently enabled."""
     try:
-        with open("/proc/sys/net/ipv4/ip_forward") as f:
-            return f.read().strip() == "1"
+        if _IS_LINUX:
+            with open("/proc/sys/net/ipv4/ip_forward") as f:
+                return f.read().strip() == "1"
+        elif _IS_MACOS:
+            out = subprocess.check_output(
+                ["sysctl", "net.inet.ip.forwarding"],
+                text=True, timeout=5,
+            )
+            return out.strip().endswith("1")
+        elif _IS_WINDOWS:
+            out = subprocess.check_output(
+                ["netsh", "interface", "ipv4", "show", "global"],
+                text=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,  # type: ignore[attr-defined]
+            )
+            return "enabled" in out.lower()
     except Exception:
-        return False
+        pass
+    return False
 
 
 # ---------------------------------------------------------------------------
-# BandwidthThrottler
+# BandwidthThrottler  (Linux only)
 # ---------------------------------------------------------------------------
 
 class BandwidthThrottler:
@@ -100,6 +166,9 @@ class BandwidthThrottler:
     1:12   – download class for target #2  …
     1:13   – upload   class for target #2  …
     … and so on, incrementing by 2 per host.
+
+    Note: Only supported on Linux. Raises ``NotImplementedError`` on macOS
+    and Windows.
     """
 
     _MAX_RATE_KBIT: int = 1_000_000   # 1 Gbit – ceiling for the default class
@@ -109,7 +178,6 @@ class BandwidthThrottler:
         self.iface: str = iface
         self._lock: threading.Lock = threading.Lock()
         self._initialized: bool = False
-        # ip → (download_class_id, upload_class_id)
         self._targets: dict[str, tuple[int, int]] = {}
         self._next_id: int = 10
 
@@ -120,20 +188,23 @@ class BandwidthThrottler:
     def setup(self) -> None:
         """Initialize the root HTB qdisc on *iface*.
 
-        Removes any existing root qdisc first, so it is safe to call more
-        than once (e.g. after a previous dirty exit).
+        Raises:
+            NotImplementedError: On macOS or Windows (tc is Linux-only).
         """
-        with self._lock:
-            # Tear down any pre-existing qdisc (ignore errors – may not exist)
-            _run(["tc", "qdisc", "del", "dev", self.iface, "root"])
+        if not _IS_LINUX:
+            raise NotImplementedError(
+                "Bandwidth throttling via tc is only supported on Linux.\n"
+                "On macOS/Windows the ARP attack still works but per-IP "
+                "speed limits are unavailable."
+            )
 
-            # Root HTB qdisc.  Unclassified traffic goes to class 999.
+        with self._lock:
+            _run(["tc", "qdisc", "del", "dev", self.iface, "root"])
             _run(
                 ["tc", "qdisc", "add", "dev", self.iface,
                  "root", "handle", "1:", "htb", "default", "999"],
                 check=True,
             )
-            # Default (unlimited) class
             _run(
                 ["tc", "class", "add", "dev", self.iface,
                  "parent", "1:", "classid", "1:999",
@@ -153,15 +224,12 @@ class BandwidthThrottler:
     ) -> None:
         """Apply or update rate limits for *target_ip*.
 
-        A value of **0** means "block completely" (enforced as 1 kbit/s so
-        that ``tc`` does not reject the rule; the host effectively has no
-        usable bandwidth).
-
-        Args:
-            target_ip:     IPv4 address of the victim device.
-            download_kbps: Victim's download speed cap in Kbps.
-            upload_kbps:   Victim's upload speed cap in Kbps.
+        A value of **0** means "block completely" (enforced as 1 kbit/s).
         """
+        if not _IS_LINUX:
+            raise NotImplementedError(
+                "Bandwidth throttling is only supported on Linux."
+            )
         dl_rate = max(self._MIN_RATE_KBIT, download_kbps)
         ul_rate = max(self._MIN_RATE_KBIT, upload_kbps)
 
@@ -178,12 +246,8 @@ class BandwidthThrottler:
                 ul_id = self._next_id + 1
                 self._next_id += 2
                 self._targets[target_ip] = (dl_id, ul_id)
-
-                # Download: traffic TO the victim (dst match, egress)
                 self._add_class(dl_id, dl_rate)
                 self._add_filter(dl_id, target_ip, "dst")
-
-                # Upload: traffic FROM the victim (src match, egress)
                 self._add_class(ul_id, ul_rate)
                 self._add_filter(ul_id, target_ip, "src")
 
@@ -200,23 +264,21 @@ class BandwidthThrottler:
     def cleanup(self) -> None:
         """Remove the root qdisc completely, restoring normal operation."""
         with self._lock:
-            _run(["tc", "qdisc", "del", "dev", self.iface, "root"])
+            if _IS_LINUX:
+                _run(["tc", "qdisc", "del", "dev", self.iface, "root"])
             self._targets.clear()
             self._initialized = False
 
     @property
     def is_setup(self) -> bool:
-        """Return True if the HTB qdisc has been initialized."""
         return self._initialized
 
     @property
     def active_targets(self) -> dict[str, tuple[int, int]]:
-        """Return a snapshot of the active target → (dl_id, ul_id) map."""
         with self._lock:
             return dict(self._targets)
 
     def get_speed(self, target_ip: str) -> Optional[tuple[int, int]]:
-        """Return (dl_class_id, ul_class_id) for *target_ip*, or None."""
         with self._lock:
             return self._targets.get(target_ip)
 
@@ -245,7 +307,6 @@ class BandwidthThrottler:
         ])
 
     def _add_filter(self, class_id: int, ip: str, direction: str) -> None:
-        """Add a u32 packet filter matching src or dst *ip*."""
         _run([
             "tc", "filter", "add", "dev", self.iface,
             "protocol", "ip", "parent", "1:0",

@@ -12,6 +12,7 @@ import csv
 import json
 import math
 import os
+import platform
 import re
 import socket
 import statistics
@@ -53,28 +54,43 @@ from wifi_killer.utils.network import (
 # ---------------------------------------------------------------------------
 # Version
 # ---------------------------------------------------------------------------
-_VERSION = "4.0.0"
+_VERSION = "4.1.0"
+
+# ---------------------------------------------------------------------------
+# Platform-aware fonts
+# ---------------------------------------------------------------------------
+_PLT = platform.system()
+if _PLT == "Darwin":           # macOS
+    _SF  = "Helvetica Neue"
+    _MF  = "Menlo"
+elif _PLT == "Windows":
+    _SF  = "Segoe UI"
+    _MF  = "Consolas"
+else:                           # Linux and other
+    _SF  = "Ubuntu"
+    _MF  = "DejaVu Sans Mono"
 
 # Colours / theme constants
 # ---------------------------------------------------------------------------
-_CLR_BG       = "#1a1a2e"
-_CLR_SIDEBAR  = "#16213e"
-_CLR_PANEL    = "#0f3460"
-_CLR_ACCENT   = "#e94560"
-_CLR_ACCENT2  = "#533483"
-_CLR_TEXT     = "#eaeaea"
-_CLR_MUTED    = "#8892b0"
-_CLR_SUCCESS  = "#64ffda"
-_CLR_WARNING  = "#ffb347"
-_CLR_DANGER   = "#ff6b6b"
-_CLR_ROW_ODD  = "#1e1e3a"
-_CLR_ROW_EVEN = "#252545"
+_CLR_BG       = "#12121e"   # deep dark navy
+_CLR_SIDEBAR  = "#1a1a2e"   # sidebar panel
+_CLR_PANEL    = "#1e2d4f"   # card / section backgrounds
+_CLR_ACCENT   = "#e94560"   # primary accent – coral red
+_CLR_ACCENT2  = "#7c3aed"   # secondary accent – violet
+_CLR_TEXT     = "#f0f0f0"   # primary text
+_CLR_MUTED    = "#94a3b8"   # secondary / label text
+_CLR_SUCCESS  = "#34d399"   # green (online, ok)
+_CLR_WARNING  = "#f59e0b"   # amber (warnings)
+_CLR_DANGER   = "#ef4444"   # red (errors, attack active)
+_CLR_ROW_ODD  = "#1a1a30"   # alternating table rows
+_CLR_ROW_EVEN = "#212140"
 
-_FONT_TITLE   = ("Segoe UI", 22, "bold")
-_FONT_HEAD    = ("Segoe UI", 14, "bold")
-_FONT_LABEL   = ("Segoe UI", 11)
-_FONT_MONO    = ("Courier New", 10)
-_FONT_SMALL   = ("Segoe UI", 9)
+_FONT_TITLE   = (_SF, 22, "bold")
+_FONT_HEAD    = (_SF, 14, "bold")
+_FONT_LABEL   = (_SF, 11)
+_FONT_MONO    = (_MF, 10)
+_FONT_SMALL   = (_SF, 9)
+_FONT_NAME    = (_SF, 11, "bold")   # device name (hostname) – prominent
 
 
 # ===========================================================================
@@ -144,7 +160,7 @@ class _ToolTip:
         tk.Label(
             self._tip, text=self._text,
             bg="#1c2333", fg="#eaeaea",
-            font=("Segoe UI", 9), padx=8, pady=4,
+            font=(_SF, 9), padx=8, pady=4,
             relief="flat", bd=1,
         ).pack()
 
@@ -167,6 +183,8 @@ class WifiKillerApp(ctk.CTk):
         self._iface: str = ""
         self._gateway: str = ""
         self._hosts: list[dict] = []
+        # Persistent device registry keyed by IP – survives across scans
+        self._host_registry: dict[str, dict] = {}
         self._monitor: Optional[object] = None  # NetworkMonitor instance
         self._active_attack: Optional[object] = None
         self._original_mac: str = ""
@@ -262,6 +280,7 @@ class WifiKillerApp(ctk.CTk):
         self._topbar.set_gateway(self._gateway)
         self._original_mac = get_interface_mac(iface) or ""
         self._hosts = []
+        self._host_registry = {}
         self._topbar.set_own_ip(self._get_own_ip())
         self.log(f"Interface changed to {iface}  |  Gateway: {self._gateway or '(unknown)'}")
 
@@ -299,6 +318,44 @@ class WifiKillerApp(ctk.CTk):
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         self._scan_history.append((ts, host_count))
         self._scan_history = self._scan_history[-5:]  # keep last 5
+
+    def merge_hosts(self, new_hosts: list[dict]) -> None:
+        """Merge new scan results into the persistent registry.
+
+        Existing hosts NOT found in the new scan are marked ``online=False``
+        (they remain in the list so the user can see them).  Hosts that ARE
+        found are updated with fresh data and marked ``online=True``.  Brand-
+        new hosts are added with ``online=True``.
+
+        After merging, ``self._hosts`` is resynchronised from the registry.
+        """
+        # Mark every known host offline; new scan will re-flag survivors.
+        for entry in self._host_registry.values():
+            entry["online"] = False
+
+        for h in new_hosts:
+            ip = h.get("ip", "")
+            if not ip:
+                continue
+            if ip in self._host_registry:
+                self._host_registry[ip].update(h)
+            else:
+                self._host_registry[ip] = dict(h)
+            self._host_registry[ip]["online"] = True
+
+        self._hosts = list(self._host_registry.values())
+
+    def add_host(self, host: dict) -> None:
+        """Add or update a single host in the registry (e.g. from monitor)."""
+        ip = host.get("ip", "")
+        if not ip:
+            return
+        if ip in self._host_registry:
+            self._host_registry[ip].update(host)
+        else:
+            self._host_registry[ip] = dict(host)
+        self._host_registry[ip]["online"] = True
+        self._hosts = list(self._host_registry.values())
 
     # ------------------------------------------------------------------ #
     # Keyboard shortcut handlers                                           #
@@ -372,7 +429,7 @@ class _Sidebar(ctk.CTkFrame):
     ]
 
     def __init__(self, parent: ctk.CTk, on_select) -> None:
-        super().__init__(parent, fg_color=_CLR_SIDEBAR, corner_radius=0, width=210)
+        super().__init__(parent, fg_color=_CLR_SIDEBAR, corner_radius=0, width=218)
         self._on_select = on_select
         self._buttons: dict[str, ctk.CTkButton] = {}
         self._active: str = ""
@@ -381,24 +438,36 @@ class _Sidebar(ctk.CTkFrame):
     def _build(self) -> None:
         self.grid_propagate(False)
 
-        logo = ctk.CTkLabel(
-            self,
-            text="📡 Wifi-Killer",
-            font=("Segoe UI", 17, "bold"),
+        # App logo / title
+        logo_frame = ctk.CTkFrame(self, fg_color="transparent")
+        logo_frame.pack(pady=(26, 2), padx=16, fill="x")
+
+        ctk.CTkLabel(
+            logo_frame,
+            text="📡",
+            font=(_SF, 26),
             text_color=_CLR_ACCENT,
-        )
-        logo.pack(pady=(28, 6), padx=16, anchor="w")
+        ).pack(side="left", padx=(0, 8))
 
-        sub = ctk.CTkLabel(
-            self,
+        title_col = ctk.CTkFrame(logo_frame, fg_color="transparent")
+        title_col.pack(side="left")
+        ctk.CTkLabel(
+            title_col,
+            text="Wifi-Killer",
+            font=(_SF, 16, "bold"),
+            text_color=_CLR_TEXT,
+            anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            title_col,
             text="Network Lab Tool",
-            font=_FONT_SMALL,
+            font=(_SF, 9),
             text_color=_CLR_MUTED,
-        )
-        sub.pack(pady=(0, 20), padx=16, anchor="w")
+            anchor="w",
+        ).pack(anchor="w")
 
-        sep = ctk.CTkFrame(self, height=1, fg_color=_CLR_PANEL)
-        sep.pack(fill="x", padx=12, pady=(0, 16))
+        ctk.CTkFrame(self, height=1, fg_color=_CLR_PANEL).pack(
+            fill="x", padx=14, pady=(14, 10))
 
         for key, label in self._NAV:
             btn = ctk.CTkButton(
@@ -410,27 +479,35 @@ class _Sidebar(ctk.CTkFrame):
                 text_color=_CLR_TEXT,
                 font=_FONT_LABEL,
                 corner_radius=8,
-                height=42,
+                height=40,
                 command=lambda k=key: self._on_select(k),
             )
-            btn.pack(fill="x", padx=10, pady=2)
+            btn.pack(fill="x", padx=10, pady=1)
             self._buttons[key] = btn
 
         # Version label at bottom
         ver = ctk.CTkLabel(
             self,
-            text=f"v{_VERSION}  |  For authorised use only",
-            font=_FONT_SMALL,
+            text=f"v{_VERSION}  ·  Authorised use only",
+            font=(_SF, 8),
             text_color=_CLR_MUTED,
         )
-        ver.pack(side="bottom", pady=14)
+        ver.pack(side="bottom", pady=12)
 
     def set_active(self, key: str) -> None:
         for k, btn in self._buttons.items():
             if k == key:
-                btn.configure(fg_color=_CLR_PANEL, text_color=_CLR_ACCENT)
+                btn.configure(
+                    fg_color=_CLR_PANEL,
+                    text_color=_CLR_ACCENT,
+                    font=(_SF, 11, "bold"),
+                )
             else:
-                btn.configure(fg_color="transparent", text_color=_CLR_TEXT)
+                btn.configure(
+                    fg_color="transparent",
+                    text_color=_CLR_TEXT,
+                    font=_FONT_LABEL,
+                )
         self._active = key
 
 
@@ -481,7 +558,7 @@ class _TopBar(ctk.CTkFrame):
         hint = ctk.CTkLabel(
             self,
             text="F5=Scan  Ctrl+A=Select All  Esc=Stop  Ctrl+Q=Quit  Ctrl+E=Export",
-            font=("Segoe UI", 8), text_color=_CLR_MUTED,
+            font=(_SF, 8), text_color=_CLR_MUTED,
         )
         hint.grid(row=0, column=6, padx=(0, 16), pady=12, sticky="e")
 
@@ -504,7 +581,7 @@ class _TopBar(ctk.CTkFrame):
 class ScanFrame(ctk.CTkFrame):
     """Host discovery panel."""
 
-    _COLS = ("IP Address", "MAC Address", "Vendor", "Hostname", "Type", "Open Ports", "Ping")
+    _COLS = ("Device / Hostname", "IP Address", "MAC Address", "Vendor", "Type", "Ports", "●")
 
     def __init__(self, parent, app: WifiKillerApp) -> None:
         super().__init__(parent, fg_color=_CLR_BG, corner_radius=0)
@@ -650,7 +727,7 @@ class ScanFrame(ctk.CTkFrame):
         hdr.grid(row=0, column=0, sticky="ew")
         for ci, col in enumerate(self._COLS):
             ctk.CTkLabel(
-                hdr, text=col, font=("Segoe UI", 10, "bold"),
+                hdr, text=col, font=(_SF, 10, "bold"),
                 text_color=_CLR_ACCENT, anchor="w",
             ).grid(row=0, column=ci, padx=(12 if ci == 0 else 4, 4), pady=8, sticky="w")
         hdr.grid_columnconfigure(len(self._COLS) - 1, weight=1)
@@ -672,7 +749,7 @@ class ScanFrame(ctk.CTkFrame):
         log_hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(8, 2))
         log_hdr.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(log_hdr, text="Activity Log", font=("Segoe UI", 10, "bold"),
+        ctk.CTkLabel(log_hdr, text="Activity Log", font=(_SF, 10, "bold"),
                      text_color=_CLR_ACCENT).grid(row=0, column=0, sticky="w")
 
         ctk.CTkButton(
@@ -763,11 +840,14 @@ class ScanFrame(ctk.CTkFrame):
                 info["ping"] = h.get("ping", False)
                 enriched.append(info)
 
-            self._app._hosts = enriched
-            self._app.record_scan(len(enriched))
-            self.after(0, lambda: self._populate_table(enriched))
+            self._app.merge_hosts(enriched)
+            all_known = list(self._app._host_registry.values())
+            online_count = sum(1 for h in all_known if h.get("online", True))
+            self._app.record_scan(online_count)
+            self.after(0, lambda ah=all_known: self._populate_table(ah))
             self.after(0, lambda: self._app.log(
-                f"Scan complete – {len(enriched)} host(s) found.", "ok"))
+                f"Scan complete – {online_count} online, "
+                f"{len(all_known) - online_count} offline (total {len(all_known)} known).", "ok"))
             self.after(0, self._app.refresh_dashboard)
 
         except Exception as exc:
@@ -862,14 +942,20 @@ class ScanFrame(ctk.CTkFrame):
         def on_new(h: dict) -> None:
             info = identify_host(h["ip"], h["mac"], gateway_ip=gw)
             info["ping"] = False
-            self._app._hosts.append(info)
+            self._app.add_host(info)
+            # Append a new row for this host at the end of the table
             self.after(0, lambda i=info: self._add_row(i, len(self._row_frames)))
             self.after(0, lambda: self._app.log(
                 f"New device: {h['ip']} ({info.get('vendor','?')})", "ok"))
 
         def on_left(h: dict) -> None:
+            ip = h.get("ip", "")
+            # Mark device offline in registry (don't remove it)
+            if ip in self._app._host_registry:
+                self._app._host_registry[ip]["online"] = False
+                self._app._hosts = list(self._app._host_registry.values())
             self.after(0, lambda: self._app.log(
-                f"Device left: {h['ip']}", "warn"))
+                f"Device left (offline): {ip}", "warn"))
 
         self._monitor_obj = NetworkMonitor(
             subnet=subnet, iface=self._app._iface,
@@ -1068,11 +1154,16 @@ class ScanFrame(ctk.CTkFrame):
 # ===========================================================================
 
 class _HostRow(ctk.CTkFrame):
-    _WIDTHS = (130, 150, 160, 150, 140, 130, 50)
+    # Column widths: [icon+name block, IP, MAC, Vendor, Type, Ports, Ping]
+    _WIDTHS = (200, 120, 150, 155, 155, 110, 42)
 
     def __init__(self, parent, info: dict, idx: int, app: WifiKillerApp) -> None:
-        bg = _CLR_ROW_ODD if idx % 2 == 0 else _CLR_ROW_EVEN
-        super().__init__(parent, fg_color=bg, corner_radius=6)
+        online = info.get("online", True)
+        if not online:
+            bg = "#111120"   # noticeably dimmer for offline hosts
+        else:
+            bg = _CLR_ROW_ODD if idx % 2 == 0 else _CLR_ROW_EVEN
+        super().__init__(parent, fg_color=bg, corner_radius=7)
         self.info = info
         self._app = app
         self.selected = tk.BooleanVar(value=False)
@@ -1081,38 +1172,86 @@ class _HostRow(ctk.CTkFrame):
     def _build(self) -> None:
         self.grid_columnconfigure(8, weight=1)
 
+        # ── Checkbox ────────────────────────────────────────────────
         chk = ctk.CTkCheckBox(
             self, text="", variable=self.selected,
             width=24, checkbox_width=18, checkbox_height=18,
         )
-        chk.grid(row=0, column=0, padx=(8, 2), pady=6)
+        chk.grid(row=0, column=0, padx=(8, 2), pady=8)
 
-        vals = [
-            self.info.get("ip", ""),
-            self.info.get("mac", ""),
-            self.info.get("vendor", "Unknown"),
-            self.info.get("hostname") or "—",
-            self.info.get("type", "Unknown"),
-            _fmt_ports(self.info.get("open_ports", [])),
-            "✓" if self.info.get("ping") else "—",
+        # ── Column 1: device icon + name/hostname (prominent) ───────
+        icon       = self.info.get("icon", "🔌")
+        hostname   = self.info.get("hostname") or ""
+        device_type = self.info.get("type", "Unknown")
+        # Display name = hostname if known, else device type
+        display_name = hostname if hostname else device_type
+
+        name_cell = ctk.CTkFrame(self, fg_color="transparent", width=self._WIDTHS[0])
+        name_cell.grid(row=0, column=1, padx=(6, 4), pady=4, sticky="w")
+        name_cell.grid_propagate(False)
+        name_cell.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            name_cell, text=icon, font=(_SF, 16), anchor="w",
+        ).grid(row=0, column=0, padx=(4, 4), pady=0, sticky="w")
+
+        _name_color = (_CLR_TEXT if hostname else _CLR_MUTED) if self.info.get("online", True) else "#444460"
+        ctk.CTkLabel(
+            name_cell, text=display_name,
+            font=_FONT_NAME,
+            text_color=_name_color,
+            anchor="w",
+        ).grid(row=0, column=1, padx=(0, 4), pady=0, sticky="w")
+
+        name_cell.bind("<Button-3>", self._show_context_menu)
+
+        # ── Columns 2-7: IP, MAC, Vendor, Type, Ports, Ping ─────────
+        ip_str = self.info.get("ip", "")
+        mac_str = self.info.get("mac", "")
+        vendor_str = self.info.get("vendor", "Unknown")
+        # Shorten vendor if too long
+        if len(vendor_str) > 18:
+            vendor_str = vendor_str[:16] + "…"
+        # Type: just the text (icon already in column 1)
+        type_str  = device_type
+        if len(type_str) > 20:
+            type_str = type_str[:18] + "…"
+        ports_str  = _fmt_ports(self.info.get("open_ports", []))
+        online     = self.info.get("online", True)
+        status_str = "●" if online else "○"
+
+        # Dim text for offline rows so they look visually distinct
+        _txt  = _CLR_TEXT  if online else "#555577"
+        _mute = _CLR_MUTED if online else "#3a3a55"
+
+        col_vals = [ip_str, mac_str, vendor_str, type_str, ports_str, status_str]
+        col_colors = [
+            _CLR_SUCCESS if online else "#3a7a55",  # IP – green online, dim offline
+            _mute,                                   # MAC
+            _txt,                                    # Vendor
+            (_CLR_WARNING if "Unknown" in type_str else _txt) if online else _mute,
+            _txt,                                    # Ports
+            _CLR_SUCCESS if online else "#555577",   # Status dot
         ]
-        for ci, (val, w) in enumerate(zip(vals, self._WIDTHS)):
+
+        for ci, (val, w, color) in enumerate(zip(col_vals, self._WIDTHS[1:], col_colors)):
             lbl = ctk.CTkLabel(
-                self, text=val, font=_FONT_LABEL,
-                text_color=_CLR_SUCCESS if ci == 0 else _CLR_TEXT,
+                self, text=val,
+                font=_FONT_MONO if ci in (0, 1) else _FONT_LABEL,
+                text_color=color,
                 anchor="w", width=w,
             )
-            lbl.grid(row=0, column=ci + 1, padx=4, pady=6, sticky="w")
+            lbl.grid(row=0, column=ci + 2, padx=(2, 2), pady=8, sticky="w")
             lbl.bind("<Button-3>", self._show_context_menu)
 
-        # Action buttons
+        # ── Action buttons ───────────────────────────────────────────
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=0, column=9, padx=(4, 8), pady=4, sticky="e")
+        btn_frame.grid(row=0, column=9, padx=(4, 10), pady=4, sticky="e")
 
         info_btn = ctk.CTkButton(
             btn_frame, text="ℹ️", width=32, height=28,
             fg_color=_CLR_PANEL, hover_color=_CLR_ACCENT2,
-            font=("Segoe UI", 11), command=self._show_detail,
+            font=(_SF, 11), command=self._show_detail,
         )
         info_btn.pack(side="left", padx=2)
         _ToolTip(info_btn, "View full details for this host")
@@ -1120,20 +1259,20 @@ class _HostRow(ctk.CTkFrame):
         copy_btn = ctk.CTkButton(
             btn_frame, text="📋", width=32, height=28,
             fg_color=_CLR_PANEL, hover_color=_CLR_ACCENT2,
-            font=("Segoe UI", 11), command=self._copy_info,
+            font=(_SF, 11), command=self._copy_info,
         )
         copy_btn.pack(side="left", padx=2)
         _ToolTip(copy_btn, "Copy host info to clipboard")
 
         atk_btn = ctk.CTkButton(
             btn_frame, text="⚡", width=32, height=28,
-            fg_color="#7b3f00", hover_color=_CLR_WARNING,
-            font=("Segoe UI", 11), command=self._quick_attack,
+            fg_color="#5a2d00", hover_color="#a05000",
+            font=(_SF, 11), command=self._quick_attack,
         )
         atk_btn.pack(side="left", padx=2)
         _ToolTip(atk_btn, "Launch ARP attack on this host")
 
-        # Right-click on the row itself
+        # Right-click on the row frame itself
         self.bind("<Button-3>", self._show_context_menu)
 
     # ── Context menu ─────────────────────────────────────────────────
@@ -1145,7 +1284,7 @@ class _HostRow(ctk.CTkFrame):
             self, tearoff=0,
             bg=_CLR_PANEL, fg=_CLR_TEXT,
             activebackground=_CLR_ACCENT, activeforeground="white",
-            font=("Segoe UI", 10),
+            font=(_SF, 10),
         )
         menu.add_command(label=f"  {ip}",       state="disabled")
         menu.add_separator()
@@ -1251,16 +1390,38 @@ class _HostDetailDialog(ctk.CTkToplevel):
 
     def _build(self) -> None:
         info = self._info
+        icon     = info.get("icon", "🔌")
+        hostname = info.get("hostname") or ""
+        ip_str   = info.get("ip", "?")
 
-        # Title bar
+        # ── Title bar ────────────────────────────────────────────────
+        title_row = ctk.CTkFrame(self, fg_color="transparent")
+        title_row.pack(padx=24, pady=(20, 2), anchor="w")
+
         ctk.CTkLabel(
-            self, text=f"📡  {info.get('ip','?')}",
-            font=_FONT_TITLE, text_color=_CLR_ACCENT,
-        ).pack(padx=24, pady=(20, 4), anchor="w")
+            title_row, text=icon, font=(_SF, 32),
+        ).pack(side="left", padx=(0, 12))
+
+        title_col = ctk.CTkFrame(title_row, fg_color="transparent")
+        title_col.pack(side="left")
+
+        # Show hostname prominently if known, else show IP
+        display_name = hostname if hostname else ip_str
+        ctk.CTkLabel(
+            title_col, text=display_name,
+            font=_FONT_TITLE, text_color=_CLR_TEXT,
+            anchor="w",
+        ).pack(anchor="w")
+        if hostname:
+            ctk.CTkLabel(
+                title_col, text=ip_str,
+                font=_FONT_MONO, text_color=_CLR_SUCCESS,
+                anchor="w",
+            ).pack(anchor="w")
 
         ctk.CTkLabel(
             self, text=info.get("vendor", "Unknown Vendor"),
-            font=_FONT_HEAD, text_color=_CLR_TEXT,
+            font=_FONT_HEAD, text_color=_CLR_MUTED,
         ).pack(padx=24, pady=(0, 12), anchor="w")
 
         # Detail rows card
@@ -1273,9 +1434,10 @@ class _HostDetailDialog(ctk.CTkToplevel):
             ("MAC Address", info.get("mac", "?")),
             ("Vendor",      info.get("vendor", "Unknown")),
             ("Hostname",    info.get("hostname") or "—"),
-            ("Device Type", info.get("type", "Unknown")),
+            ("Device Type", f"{info.get('icon','🔌')}  {info.get('type', 'Unknown')}"),
+            ("OS Hint",     info.get("os_hint", "—")),
             ("Open Ports",  _fmt_ports(info.get("open_ports", []))),
-            ("Ping",        "✓ Alive" if info.get("ping") else "—"),
+            ("Ping",        "● Alive" if info.get("ping") else "○ No response"),
             ("Subnet",      info.get("subnet", "—")),
         ]
         for ri, (label, val) in enumerate(fields):
@@ -2019,9 +2181,9 @@ class DashboardFrame(ctk.CTkFrame):
 
         hdr = ctk.CTkFrame(recent, fg_color=_CLR_PANEL, corner_radius=0)
         hdr.grid(row=1, column=0, sticky="ew")
-        for ci, col in enumerate(("IP Address", "Vendor", "Type", "Hostname")):
+        for ci, col in enumerate(("Device / Hostname", "IP Address", "Vendor", "Type")):
             ctk.CTkLabel(hdr, text=col,
-                         font=("Segoe UI", 10, "bold"),
+                         font=(_SF, 10, "bold"),
                          text_color=_CLR_ACCENT, anchor="w").grid(
                 row=0, column=ci,
                 padx=(14 if ci == 0 else 8, 4), pady=7, sticky="w")
@@ -2082,7 +2244,7 @@ class DashboardFrame(ctk.CTkFrame):
         ctk.CTkLabel(card, text=title, font=_FONT_SMALL,
                      text_color=_CLR_MUTED).pack(padx=14, pady=(12, 2), anchor="w")
         val_label = ctk.CTkLabel(card, text=value,
-                                 font=("Segoe UI", 20, "bold"),
+                                 font=(_SF, 20, "bold"),
                                  text_color=_CLR_SUCCESS)
         val_label.pack(padx=14, pady=(0, 12), anchor="w")
         return val_label
@@ -2125,18 +2287,25 @@ class DashboardFrame(ctk.CTkFrame):
                 row = ctk.CTkFrame(self._recent_body, fg_color=bg, corner_radius=6)
                 row.pack(fill="x", padx=4, pady=1)
                 row.grid_columnconfigure(3, weight=1)
-                for ci, (val, w, color) in enumerate([
-                    (h.get("ip", ""),             110, _CLR_SUCCESS),
-                    (h.get("vendor", "Unknown"),   150, _CLR_TEXT),
-                    (h.get("type", "Unknown"),     120, _CLR_MUTED),
-                    (h.get("hostname") or "—",     0,   _CLR_TEXT),
+                icon     = h.get("icon", "🔌")
+                hostname = h.get("hostname") or ""
+                dev_type = h.get("type", "Unknown")
+                display  = f"{icon}  {hostname}" if hostname else f"{icon}  {dev_type}"
+                vendor   = h.get("vendor", "Unknown")
+                if len(vendor) > 18:
+                    vendor = vendor[:16] + "…"
+                for ci, (val, w, color, font) in enumerate([
+                    (display,              180, _CLR_TEXT,    _FONT_NAME),
+                    (h.get("ip", ""),      110, _CLR_SUCCESS, _FONT_MONO),
+                    (vendor,               140, _CLR_MUTED,   _FONT_LABEL),
+                    (dev_type,             0,   _CLR_TEXT,    _FONT_LABEL),
                 ]):
                     ctk.CTkLabel(
-                        row, text=val, font=_FONT_LABEL,
+                        row, text=val, font=font,
                         text_color=color, anchor="w",
                         **({"width": w} if w else {}),
                     ).grid(row=0, column=ci,
-                           padx=(14 if ci == 0 else 8, 4), pady=7, sticky="w")
+                           padx=(10 if ci == 0 else 8, 4), pady=6, sticky="w")
 
         self._last_refresh_label.configure(
             text=f"Last updated {time.strftime('%H:%M:%S')}")
@@ -2241,7 +2410,7 @@ class PingMonitorFrame(ctk.CTkFrame):
         hdr.grid(row=0, column=0, sticky="ew")
         for ci, col in enumerate(("Host / IP", "Last RTT", "Min", "Avg", "Max", "Sent", "Status")):
             ctk.CTkLabel(hdr, text=col,
-                         font=("Segoe UI", 10, "bold"),
+                         font=(_SF, 10, "bold"),
                          text_color=_CLR_ACCENT, anchor="w").grid(
                 row=0, column=ci,
                 padx=(14 if ci == 0 else 16, 4), pady=8, sticky="w")
@@ -2552,7 +2721,7 @@ class MultiSubnetFrame(ctk.CTkFrame):
         hdr.grid(row=0, column=0, sticky="ew")
         for ci, col in enumerate(("Subnet", "IP Address", "MAC", "Vendor", "Type")):
             ctk.CTkLabel(
-                hdr, text=col, font=("Segoe UI", 10, "bold"),
+                hdr, text=col, font=(_SF, 10, "bold"),
                 text_color=_CLR_ACCENT, anchor="w",
             ).grid(row=0, column=ci, padx=(12 if ci == 0 else 4, 4), pady=8, sticky="w")
         hdr.grid_columnconfigure(4, weight=1)
@@ -2682,15 +2851,13 @@ class MultiSubnetFrame(ctk.CTkFrame):
                 info["subnet"] = h.get("subnet", "")
                 enriched.append(info)
 
-            # Merge into global host list (de-dup by IP)
-            existing_ips = {h["ip"] for h in self._app._hosts}
-            for h in enriched:
-                if h["ip"] not in existing_ips:
-                    self._app._hosts.append(h)
+            # Merge into persistent registry (preserves offline hosts from prev scans)
+            self._app.merge_hosts(enriched)
 
             self.after(0, lambda: self._populate_results(enriched))
             self.after(0, lambda: self._app.log(
-                f"Multi-subnet complete – {len(enriched)} host(s) across {total} subnet(s).", "ok"))
+                f"Multi-subnet complete – {len(enriched)} host(s) across {total} subnet(s). "
+                f"Total known: {len(self._app._host_registry)}.", "ok"))
 
         except Exception as exc:
             self.after(0, lambda exc=exc: self._app.log(f"Multi-subnet error: {exc}", "err"))
@@ -2812,58 +2979,120 @@ class NetworkMapFrame(ctk.CTkFrame):
         self._canvas.bind("<Configure>", lambda _e: self.redraw())
 
     def redraw(self) -> None:
-        """Redraw the network topology on the canvas."""
+        """Redraw the network topology on the canvas.
+
+        The actual gateway router sits in the **centre**; every other
+        discovered host is arranged in a ring around it.  The gateway IP
+        and the local machine's own IP are excluded from the ring so the
+        map truly shows "devices connected to the router", not to this Mac.
+        Online hosts are drawn in colour; offline (seen in a previous scan
+        but absent from the last one) are drawn in grey.
+        """
         canvas = self._canvas
         canvas.delete("all")
 
         w = canvas.winfo_width()
         h = canvas.winfo_height()
         if w < 10 or h < 10:
-            return  # widget not yet rendered
+            return
 
-        hosts  = self._app._hosts
-        gw_ip  = self._app._gateway or "Gateway"
-        n      = len(hosts)
-        cx, cy = w // 2, h // 2
+        all_hosts = self._app._hosts
+        gw_ip     = self._app._gateway or ""
+        own_ip    = self._app._get_own_ip()
+        cx, cy    = w // 2, h // 2
 
-        if n == 0:
+        # ── Separate gateway entry from peripheral nodes ──────────────
+        # The gateway was discovered by ARP like every other host; we pull
+        # it out so it only appears in the centre, not also in the ring.
+        gw_host: Optional[dict] = None
+        ring_hosts: list[dict]  = []
+        for h in all_hosts:
+            ip = h.get("ip", "")
+            if ip == gw_ip:
+                gw_host = h          # gateway info (vendor / hostname)
+            elif ip and ip != own_ip:
+                ring_hosts.append(h) # regular client device
+
+        n = len(ring_hosts)
+
+        if n == 0 and not gw_ip:
             canvas.create_text(
                 cx, cy,
                 text="No hosts discovered.\nRun a scan first (Scan Network or Multi-Subnet).",
-                fill=_CLR_MUTED, font=("Segoe UI", 13), justify="center",
+                fill=_CLR_MUTED, font=(_SF, 13), justify="center",
             )
             self._lbl_count.configure(text="No hosts loaded – run a scan first.")
             return
 
-        self._lbl_count.configure(text=f"{n} host(s) in map")
+        online_count  = sum(1 for h in ring_hosts if h.get("online", True))
+        offline_count = n - online_count
+        status_txt = f"{online_count} online"
+        if offline_count:
+            status_txt += f"  ·  {offline_count} offline"
+        if gw_ip:
+            status_txt += f"  ·  GW {gw_ip}"
+        self._lbl_count.configure(text=status_txt)
 
-        radius = min(w, h) * 0.38   # circle radius for host nodes
+        radius = min(w, h) * 0.38
 
-        # ── Edges ─────────────────────────────────────────────────────
+        # ── Legend (top-right corner) ──────────────────────────────────
+        lx, ly = w - 140, 14
+        canvas.create_rectangle(lx - 6, ly - 4, w - 4, ly + 64,
+                                 fill="#0d0d1a", outline="#333355", width=1)
+        canvas.create_oval(lx, ly + 4,  lx + 12, ly + 16,
+                            fill=_CLR_ACCENT2, outline="")
+        canvas.create_text(lx + 18, ly + 10, text="Online device",
+                            fill=_CLR_MUTED, font=(_SF, 8), anchor="w")
+        canvas.create_oval(lx, ly + 22, lx + 12, ly + 34,
+                            fill="#333355", outline="")
+        canvas.create_text(lx + 18, ly + 28, text="Offline device",
+                            fill=_CLR_MUTED, font=(_SF, 8), anchor="w")
+        canvas.create_oval(lx, ly + 40, lx + 12, ly + 52,
+                            fill=_CLR_ACCENT, outline="")
+        canvas.create_text(lx + 18, ly + 46, text="Gateway (router)",
+                            fill=_CLR_MUTED, font=(_SF, 8), anchor="w")
+
+        # ── Edges (spokes from gateway to each ring node) ─────────────
         for i in range(n):
             angle = 2 * math.pi * i / n - math.pi / 2
             hx = cx + radius * math.cos(angle)
             hy = cy + radius * math.sin(angle)
+            online = ring_hosts[i].get("online", True)
             canvas.create_line(
                 cx, cy, hx, hy,
-                fill=_CLR_PANEL, width=2, dash=(6, 4),
+                fill="#2a2a4a" if not online else _CLR_PANEL,
+                width=2, dash=(6, 4),
             )
 
-        # ── Gateway node ───────────────────────────────────────────────
+        # ── Gateway node (centre) ──────────────────────────────────────
         gr = self._GW_R
+        gw_online = gw_host.get("online", True) if gw_host else bool(gw_ip)
+        gw_color  = _CLR_ACCENT if gw_online else "#7a3050"
         canvas.create_oval(
             cx - gr, cy - gr, cx + gr, cy + gr,
-            fill=_CLR_ACCENT, outline=_CLR_TEXT, width=2,
+            fill=gw_color, outline=_CLR_TEXT, width=2,
         )
-        canvas.create_text(cx, cy, text="GW", fill="#ffffff", font=("Segoe UI", 11, "bold"))
+        canvas.create_text(cx, cy, text="GW", fill="#ffffff", font=(_SF, 11, "bold"))
+
+        # IP above the gateway node
         canvas.create_text(
             cx, cy - gr - 14,
-            text=gw_ip, fill=_CLR_TEXT, font=("Segoe UI", 9, "bold"),
+            text=gw_ip if gw_ip else "Gateway",
+            fill=_CLR_TEXT, font=(_SF, 9, "bold"),
         )
+        # Hostname or vendor below the gateway node
+        if gw_host:
+            gw_label = gw_host.get("hostname") or gw_host.get("vendor", "")
+            if gw_label and gw_label != "Unknown":
+                canvas.create_text(
+                    cx, cy + gr + 14,
+                    text=gw_label[:22],
+                    fill=_CLR_MUTED, font=(_SF, 8),
+                )
 
-        # ── Host nodes ────────────────────────────────────────────────
+        # ── Host nodes (ring) ─────────────────────────────────────────
         r = self._NODE_R
-        for i, host in enumerate(hosts):
+        for i, host in enumerate(ring_hosts):
             angle = 2 * math.pi * i / n - math.pi / 2
             hx = cx + radius * math.cos(angle)
             hy = cy + radius * math.sin(angle)
@@ -2871,34 +3100,65 @@ class NetworkMapFrame(ctk.CTkFrame):
             ip     = host.get("ip", "?")
             vendor = host.get("vendor", "")
             htype  = host.get("type", "").lower()
+            online = host.get("online", True)
+            icon   = host.get("icon", "")
 
-            if "router" in htype or "gateway" in htype:
-                fill = _CLR_ACCENT
-            elif "mobile" in htype or "phone" in htype:
-                fill = "#5bc0de"
+            # Colour by type (muted when offline)
+            if not online:
+                fill    = "#2a2a44"
+                outline = "#444466"
+            elif "mobile" in htype or "phone" in htype or "ipad" in htype:
+                fill    = "#5bc0de"
+                outline = _CLR_TEXT
             elif "printer" in htype:
-                fill = _CLR_WARNING
+                fill    = _CLR_WARNING
+                outline = _CLR_TEXT
+            elif "mac" in htype or "apple" in htype:
+                fill    = "#7c3aed"
+                outline = _CLR_TEXT
+            elif "tv" in htype or "console" in htype:
+                fill    = "#0ea5e9"
+                outline = _CLR_TEXT
             else:
-                fill = _CLR_ACCENT2
+                fill    = _CLR_ACCENT2
+                outline = _CLR_TEXT
 
             canvas.create_oval(
                 hx - r, hy - r, hx + r, hy + r,
-                fill=fill, outline=_CLR_TEXT, width=1,
+                fill=fill, outline=outline, width=1,
             )
 
-            # IP label
-            label_y = hy + r + 14
+            # Small icon inside the node
+            if icon:
+                canvas.create_text(
+                    hx, hy, text=icon, font=(_SF, 11),
+                )
+
+            # IP below the node
+            label_y  = hy + r + 13
+            ip_color = _CLR_TEXT if online else "#555577"
             canvas.create_text(
                 hx, label_y,
-                text=ip, fill=_CLR_TEXT, font=("Segoe UI", 8, "bold"),
+                text=ip, fill=ip_color, font=(_SF, 8, "bold"),
             )
 
-            # Vendor label (truncated)
-            if vendor and vendor not in ("Unknown", ""):
-                short = vendor[:18] + ("…" if len(vendor) > 18 else "")
+            # Hostname (preferred) or vendor under the IP
+            sub_label = host.get("hostname") or ""
+            if not sub_label and vendor and vendor not in ("Unknown", ""):
+                sub_label = vendor[:18] + ("…" if len(vendor) > 18 else "")
+            if sub_label:
                 canvas.create_text(
                     hx, label_y + 13,
-                    text=short, fill=_CLR_MUTED, font=("Segoe UI", 7),
+                    text=sub_label[:20],
+                    fill="#555577" if not online else _CLR_MUTED,
+                    font=(_SF, 7),
+                )
+
+            # "OFFLINE" badge for hosts that disappeared
+            if not online:
+                canvas.create_text(
+                    hx, hy, text="off",
+                    fill="#888899", font=(_SF, 7, "bold"),
                 )
 
 
@@ -3070,7 +3330,7 @@ class ThrottleFrame(ctk.CTkFrame):
         hdr.grid(row=1, column=0, sticky="ew")
         for ci, col in enumerate(("Target IP", "Download", "Upload", "Status")):
             ctk.CTkLabel(
-                hdr, text=col, font=("Segoe UI", 10, "bold"),
+                hdr, text=col, font=(_SF, 10, "bold"),
                 text_color=_CLR_ACCENT, anchor="w",
             ).grid(row=0, column=ci, padx=(12 if ci == 0 else 20, 4), pady=8, sticky="w")
         hdr.grid_columnconfigure(3, weight=1)
@@ -3558,7 +3818,7 @@ class DnsSnifferFrame(ctk.CTkFrame):
         hdr = ctk.CTkFrame(tbl, fg_color=_CLR_PANEL, corner_radius=0)
         hdr.grid(row=0, column=0, sticky="ew")
         for ci, col in enumerate(("Timestamp", "Source IP", "Domain", "Type")):
-            ctk.CTkLabel(hdr, text=col, font=("Segoe UI", 10, "bold"),
+            ctk.CTkLabel(hdr, text=col, font=(_SF, 10, "bold"),
                          text_color=_CLR_ACCENT, anchor="w").grid(
                 row=0, column=ci, padx=(14 if ci == 0 else 8, 4), pady=8, sticky="w")
         hdr.grid_columnconfigure(2, weight=1)
@@ -3736,7 +3996,7 @@ class ArpCacheFrame(ctk.CTkFrame):
         hdr = ctk.CTkFrame(tbl, fg_color=_CLR_PANEL, corner_radius=0)
         hdr.grid(row=0, column=0, sticky="ew")
         for ci, col in enumerate(("IP Address", "MAC Address", "State", "Interface")):
-            ctk.CTkLabel(hdr, text=col, font=("Segoe UI", 10, "bold"),
+            ctk.CTkLabel(hdr, text=col, font=(_SF, 10, "bold"),
                          text_color=_CLR_ACCENT, anchor="w").grid(
                 row=0, column=ci, padx=(14 if ci == 0 else 8, 4), pady=8, sticky="w")
         hdr.grid_columnconfigure(3, weight=1)
@@ -3832,12 +4092,12 @@ class AboutFrame(ctk.CTkFrame):
 
         ctk.CTkLabel(
             inner, text="📡  Wifi-Killer",
-            font=("Segoe UI", 36, "bold"), text_color=_CLR_ACCENT,
+            font=(_SF, 36, "bold"), text_color=_CLR_ACCENT,
         ).pack(pady=(0, 4))
 
         ctk.CTkLabel(
             inner, text=f"v{_VERSION}  ·  Modern Network Lab Tool",
-            font=("Segoe UI", 14), text_color=_CLR_MUTED,
+            font=(_SF, 14), text_color=_CLR_MUTED,
         ).pack(pady=(0, 24))
 
         features = [

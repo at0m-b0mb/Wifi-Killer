@@ -381,23 +381,17 @@ def get_interface_subnet(iface: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def list_interfaces() -> list[str]:
-    """Return a list of up network interface names (excluding loopback)."""
+    """Return a list of active network interface names with IPv4 addresses.
 
-    # 1. Scapy (cross-platform)
-    if _SCAPY_AVAILABLE:
-        try:
-            ifaces = _scapy_get_if_list()
-            result = [
-                i for i in ifaces
-                if i and not i.lower().startswith("lo")
-                and i.lower() not in ("loopback", "lo0")
-            ]
-            if result:
-                return result
-        except Exception:
-            pass
+    On macOS and Windows the OS-specific commands are tried first because
+    Scapy's ``get_if_list()`` returns every virtual/VPN/tunnel adapter and
+    causes Scapy to pick a dead interface, resulting in
+    ``OSError: [Errno 50] Network is down``.
+    """
 
-    # 2. Linux: ip -o link show up
+    # ------------------------------------------------------------------ #
+    # Linux: ip command first, Scapy as fallback                          #
+    # ------------------------------------------------------------------ #
     if _IS_LINUX:
         try:
             out = subprocess.check_output(
@@ -410,38 +404,73 @@ def list_interfaces() -> list[str]:
                     name = m.group(1)
                     if name != "lo":
                         ifaces.append(name)
-            return ifaces
+            if ifaces:
+                return ifaces
         except Exception:
             pass
 
-    # 3. macOS: ifconfig -l then filter out loopback
+        # Scapy fallback for Linux
+        if _SCAPY_AVAILABLE:
+            try:
+                raw = _scapy_get_if_list()
+                result = [i for i in raw if i and i != "lo"]
+                if result:
+                    return result
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------ #
+    # macOS: ifconfig (only UP interfaces with an IPv4 address)           #
+    # ------------------------------------------------------------------ #
     elif _IS_MACOS:
         try:
-            out = subprocess.check_output(
-                ["ifconfig", "-l"], text=True, timeout=5
+            # -l up = only UP interfaces
+            up_out = subprocess.check_output(
+                ["ifconfig", "-l", "up"], text=True, timeout=5
             )
-            ifaces = [
-                i for i in out.split()
+            candidates = [
+                i for i in up_out.split()
                 if i and not i.startswith("lo")
             ]
-            # Filter to only interfaces that have an IPv4 address
-            active = []
-            for iface in ifaces:
+            # Keep only those with an actual inet (IPv4) address
+            active: list[str] = []
+            for iface in candidates:
                 try:
-                    ip_out = subprocess.check_output(
-                        ["ifconfig", iface], text=True, timeout=3
+                    ifc_out = subprocess.check_output(
+                        ["ifconfig", iface], text=True, timeout=3,
+                        stderr=subprocess.DEVNULL,
                     )
-                    if "inet " in ip_out and "status: active" in ip_out.lower():
-                        active.append(iface)
-                    elif "inet " in ip_out:
+                    if re.search(r"\binet\s+\d+\.\d+\.\d+\.\d+", ifc_out):
                         active.append(iface)
                 except Exception:
                     pass
-            return active if active else ifaces
+            if active:
+                return active
         except Exception:
             pass
 
-    # 4. Windows: ipconfig adapter names
+        # Scapy fallback for macOS – filter only ifaces with real IPs
+        if _SCAPY_AVAILABLE:
+            try:
+                raw = _scapy_get_if_list()
+                result = []
+                for i in raw:
+                    if not i or i.startswith("lo"):
+                        continue
+                    try:
+                        ip = _scapy_get_if_addr(i)
+                        if ip and ip != "0.0.0.0":
+                            result.append(i)
+                    except Exception:
+                        pass
+                if result:
+                    return result
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------ #
+    # Windows: ipconfig adapter names                                      #
+    # ------------------------------------------------------------------ #
     elif _IS_WINDOWS:
         try:
             out = subprocess.check_output(
@@ -449,14 +478,25 @@ def list_interfaces() -> list[str]:
                 text=True, timeout=10,
                 creationflags=subprocess.CREATE_NO_WINDOW,  # type: ignore[attr-defined]
             )
-            ifaces = []
+            ifaces: list[str] = []
             for line in out.splitlines():
                 m = re.match(r"^(\S.+?)\s+adapter\s+(.+?)\s*:", line)
                 if m:
                     ifaces.append(m.group(2).strip())
-            return ifaces
+            if ifaces:
+                return ifaces
         except Exception:
             pass
+
+        # Scapy fallback for Windows
+        if _SCAPY_AVAILABLE:
+            try:
+                raw = _scapy_get_if_list()
+                result = [i for i in raw if i and "loopback" not in i.lower()]
+                if result:
+                    return result
+            except Exception:
+                pass
 
     return []
 
@@ -701,19 +741,30 @@ def split_large_subnet(cidr: str, max_prefix: int = 24) -> list[str]:
 
 
 def _default_iface() -> str:
-    """Return the best available non-loopback interface name."""
-    # Prefer Scapy's chosen default interface
+    """Return the best available non-loopback interface that has an IPv4 address.
+
+    Scapy's ``conf.iface`` is intentionally NOT used as the primary source
+    because on macOS it is often set to a VPN tunnel (``utun*``) or a dead
+    wireless adapter (``awdl0``) which causes ``OSError: [Errno 50] Network
+    is down`` when Scapy tries to open a BPF socket on it.
+    """
+    # list_interfaces() already filters to active interfaces with IPv4 addresses
+    ifaces = list_interfaces()
+    if ifaces:
+        return ifaces[0]
+
+    # Last-resort: check Scapy's choice only if it has a real IP
     if _SCAPY_AVAILABLE:
         try:
             iface = str(_scapy_conf.iface)
             if iface and iface not in ("lo", "lo0", "loopback"):
-                return iface
+                ip = _scapy_get_if_addr(iface)
+                if ip and ip != "0.0.0.0":
+                    return iface
         except Exception:
             pass
-    ifaces = list_interfaces()
-    if ifaces:
-        return ifaces[0]
-    # Hard-coded fallbacks per platform
+
+    # Hard-coded platform fallbacks
     if _IS_MACOS:
         return "en0"
     if _IS_WINDOWS:

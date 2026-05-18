@@ -424,9 +424,10 @@ def list_interfaces() -> list[str]:
     # ------------------------------------------------------------------ #
     elif _IS_MACOS:
         try:
-            # -l up = only UP interfaces
+            # -l = list interface names only; -u = restrict to UP interfaces
             up_out = subprocess.check_output(
-                ["ifconfig", "-l", "up"], text=True, timeout=5
+                ["ifconfig", "-l", "-u"], text=True, timeout=5,
+                stderr=subprocess.DEVNULL,
             )
             candidates = [
                 i for i in up_out.split()
@@ -529,17 +530,65 @@ def _icmp_checksum(data: bytes) -> int:
     return ~s & 0xFFFF
 
 
+def _ping_via_system(ip: str, timeout: float) -> Optional[float]:
+    """Use the OS `ping` binary to probe *ip*. Returns RTT (ms) or None.
+
+    This works without root on every supported platform — macOS uses
+    unprivileged ICMP DGRAM under the hood, Linux honours
+    ``net.ipv4.ping_group_range`` (open by default on most distros), and
+    Windows ships ``ping.exe`` with the OS. The subprocess overhead is
+    ~5–15 ms which is fine for a per-host probe.
+    """
+    if _IS_WINDOWS:
+        # Windows: -n count, -w timeout in ms
+        cmd = ["ping", "-n", "1", "-w", str(int(timeout * 1000)), ip]
+    elif _IS_MACOS:
+        # macOS: -c count, -W per-packet timeout in ms, -t overall in seconds
+        cmd = ["ping", "-c", "1", "-W", str(int(timeout * 1000)),
+               "-t", str(max(1, int(timeout))), ip]
+    else:
+        # Linux: -c count, -W per-packet timeout in seconds (integer)
+        cmd = ["ping", "-c", "1", "-W", str(max(1, int(timeout))), ip]
+
+    try:
+        # Add a safety margin so subprocess.run doesn't time out before ping does.
+        proc = subprocess.run(
+            cmd,
+            capture_output=True, text=True,
+            timeout=timeout + 1.5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+
+    if proc.returncode != 0:
+        return None
+
+    # Parse "time=12.3 ms" (Unix) or "time=12ms" / "time<1ms" (Windows).
+    m = re.search(r"time[=<]\s*([\d.]+)\s*ms", proc.stdout)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+    # Reply received but no time field (e.g. very fast Windows reply) —
+    # treat as alive with 0 ms rather than reporting offline.
+    return 0.0
+
+
 def ping_once(host: str, timeout: float = 1.0) -> Optional[float]:
     """Send one ICMP echo request and return RTT in milliseconds, or None.
 
-    Falls back to a TCP connect probe to port 80 when raw sockets are
-    not available.
+    Probe chain (first success wins):
+      1. Raw ICMP socket — fastest, requires root.
+      2. System ``ping`` command — works unprivileged on every OS.
+      3. TCP connect to port 80 — last resort for hosts that drop ICMP.
     """
     try:
         ip = socket.gethostbyname(host)
     except socket.gaierror:
         return None
 
+    # ── 1. Raw ICMP (fast path when running as root) ───────────────────
     sock = None
     try:
         icmp_proto = socket.getprotobyname("icmp")
@@ -553,18 +602,22 @@ def ping_once(host: str, timeout: float = 1.0) -> Optional[float]:
         packet = header + payload
         t0 = time.perf_counter()
         sock.sendto(packet, (ip, 0))
+        deadline = t0 + timeout
         while True:
-            ready = select.select([sock], [], [], timeout)
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break  # fall through to next probe
+            ready = select.select([sock], [], [], remaining)
             if not ready[0]:
-                return None
+                break
             data, _ = sock.recvfrom(1024)
             elapsed = (time.perf_counter() - t0) * 1000
             if len(data) >= 28 and data[20] == 0:
                 return elapsed
-    except PermissionError:
+    except (PermissionError, OSError):
         pass
     except Exception:
-        return None
+        pass
     finally:
         if sock:
             try:
@@ -572,7 +625,12 @@ def ping_once(host: str, timeout: float = 1.0) -> Optional[float]:
             except Exception:
                 pass
 
-    # TCP connect fallback
+    # ── 2. System `ping` (unprivileged, reliable) ──────────────────────
+    rtt = _ping_via_system(ip, timeout)
+    if rtt is not None:
+        return rtt
+
+    # ── 3. TCP connect to port 80 (covers ICMP-blocked hosts) ──────────
     try:
         t0 = time.perf_counter()
         with socket.create_connection((ip, 80), timeout=timeout):

@@ -70,27 +70,30 @@ else:                           # Linux and other
     _SF  = "Ubuntu"
     _MF  = "DejaVu Sans Mono"
 
-# Colours / theme constants
+# Colours / theme constants — modern dark palette
 # ---------------------------------------------------------------------------
-_CLR_BG       = "#12121e"   # deep dark navy
-_CLR_SIDEBAR  = "#1a1a2e"   # sidebar panel
-_CLR_PANEL    = "#1e2d4f"   # card / section backgrounds
-_CLR_ACCENT   = "#e94560"   # primary accent – coral red
-_CLR_ACCENT2  = "#7c3aed"   # secondary accent – violet
-_CLR_TEXT     = "#f0f0f0"   # primary text
-_CLR_MUTED    = "#94a3b8"   # secondary / label text
-_CLR_SUCCESS  = "#34d399"   # green (online, ok)
+_CLR_BG       = "#0b0b12"   # app background – true near-black
+_CLR_SIDEBAR  = "#11111c"   # sidebar / top-bar surface (elevation 1)
+_CLR_PANEL    = "#181826"   # cards & section surfaces       (elevation 2)
+_CLR_HOVER    = "#222234"   # hover state for nav / buttons
+_CLR_BORDER   = "#2a2a3a"   # subtle separators & dividers
+_CLR_ACCENT   = "#ff3b5c"   # primary accent – refined crimson
+_CLR_ACCENT2  = "#8b5cf6"   # secondary accent – violet
+_CLR_TEXT     = "#ececf1"   # primary text                 (off-white)
+_CLR_MUTED    = "#8a8a9c"   # secondary / label text
+_CLR_SUCCESS  = "#10b981"   # green (online, ok)
 _CLR_WARNING  = "#f59e0b"   # amber (warnings)
 _CLR_DANGER   = "#ef4444"   # red (errors, attack active)
-_CLR_ROW_ODD  = "#1a1a30"   # alternating table rows
-_CLR_ROW_EVEN = "#212140"
+_CLR_ROW_ODD  = "#16161f"   # alternating table rows
+_CLR_ROW_EVEN = "#1c1c28"
 
-_FONT_TITLE   = (_SF, 22, "bold")
-_FONT_HEAD    = (_SF, 14, "bold")
-_FONT_LABEL   = (_SF, 11)
-_FONT_MONO    = (_MF, 10)
-_FONT_SMALL   = (_SF, 9)
-_FONT_NAME    = (_SF, 11, "bold")   # device name (hostname) – prominent
+# Typography — refined scale, slightly larger for readability
+_FONT_TITLE   = (_SF, 24, "bold")
+_FONT_HEAD    = (_SF, 15, "bold")
+_FONT_LABEL   = (_SF, 12)
+_FONT_MONO    = (_MF, 11)
+_FONT_SMALL   = (_SF, 10)
+_FONT_NAME    = (_SF, 12, "bold")   # device name (hostname) – prominent
 
 
 # ===========================================================================
@@ -153,16 +156,199 @@ class _ToolTip:
 
     def _show(self) -> None:
         x = self._widget.winfo_rootx() + self._widget.winfo_width() // 2
-        y = self._widget.winfo_rooty() + self._widget.winfo_height() + 4
+        y = self._widget.winfo_rooty() + self._widget.winfo_height() + 6
         self._tip = tk.Toplevel(self._widget)
         self._tip.wm_overrideredirect(True)
         self._tip.wm_geometry(f"+{x}+{y}")
         tk.Label(
             self._tip, text=self._text,
-            bg="#1c2333", fg="#eaeaea",
-            font=(_SF, 9), padx=8, pady=4,
-            relief="flat", bd=1,
+            bg=_CLR_PANEL, fg=_CLR_TEXT,
+            font=(_SF, 10), padx=10, pady=5,
+            relief="flat", bd=0,
+            highlightbackground=_CLR_BORDER, highlightthickness=1,
         ).pack()
+
+
+# ===========================================================================
+# Reusable styled widget helpers
+# ===========================================================================
+
+def _shade(hex_color: str, factor: float) -> str:
+    """Return *hex_color* lightened (factor>1) or darkened (factor<1)."""
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    r = max(0, min(255, int(r * factor)))
+    g = max(0, min(255, int(g * factor)))
+    b = max(0, min(255, int(b * factor)))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _primary_button(parent, text: str, command=None, **kwargs):
+    """Bold accent-filled call-to-action button."""
+    defaults = dict(
+        text=text,
+        command=command,
+        fg_color=_CLR_ACCENT,
+        hover_color=_shade(_CLR_ACCENT, 0.85),
+        text_color="#ffffff",
+        font=(_SF, 12, "bold"),
+        corner_radius=10,
+        height=40,
+        border_width=0,
+    )
+    defaults.update(kwargs)
+    return ctk.CTkButton(parent, **defaults)
+
+
+def _secondary_button(parent, text: str, command=None, **kwargs):
+    """Neutral panel-filled button — for secondary actions."""
+    defaults = dict(
+        text=text,
+        command=command,
+        fg_color=_CLR_PANEL,
+        hover_color=_CLR_HOVER,
+        text_color=_CLR_TEXT,
+        font=_FONT_LABEL,
+        corner_radius=10,
+        height=38,
+        border_width=1,
+        border_color=_CLR_BORDER,
+    )
+    defaults.update(kwargs)
+    return ctk.CTkButton(parent, **defaults)
+
+
+def _danger_button(parent, text: str, command=None, **kwargs):
+    """Destructive red action button."""
+    defaults = dict(
+        text=text,
+        command=command,
+        fg_color=_CLR_DANGER,
+        hover_color=_shade(_CLR_DANGER, 0.85),
+        text_color="#ffffff",
+        font=(_SF, 12, "bold"),
+        corner_radius=10,
+        height=40,
+        border_width=0,
+    )
+    defaults.update(kwargs)
+    return ctk.CTkButton(parent, **defaults)
+
+
+def _ghost_button(parent, text: str, command=None, **kwargs):
+    """Transparent bordered button — quiet/tertiary action."""
+    defaults = dict(
+        text=text,
+        command=command,
+        fg_color="transparent",
+        hover_color=_CLR_HOVER,
+        text_color=_CLR_TEXT,
+        font=_FONT_LABEL,
+        corner_radius=10,
+        height=36,
+        border_width=1,
+        border_color=_CLR_BORDER,
+    )
+    defaults.update(kwargs)
+    return ctk.CTkButton(parent, **defaults)
+
+
+def _page_header(
+    parent,
+    icon: str,
+    title: str,
+    subtitle: str = "",
+) -> "ctk.CTkFrame":
+    """Standard page header: large icon + title + optional subtitle.
+
+    Returns a container frame so callers can add right-aligned widgets
+    via ``frame.right_slot`` (a sub-frame on the right side).
+    """
+    header = ctk.CTkFrame(parent, fg_color="transparent")
+    header.grid_columnconfigure(1, weight=1)
+
+    # Icon badge — accent-tinted square
+    icon_badge = ctk.CTkFrame(
+        header,
+        fg_color=_CLR_PANEL,
+        corner_radius=12,
+        width=44, height=44,
+        border_width=1,
+        border_color=_CLR_BORDER,
+    )
+    icon_badge.grid(row=0, column=0, rowspan=2, padx=(0, 14), sticky="w")
+    icon_badge.grid_propagate(False)
+    ctk.CTkLabel(
+        icon_badge, text=icon, font=(_SF, 22),
+        text_color=_CLR_ACCENT,
+    ).place(relx=0.5, rely=0.5, anchor="center")
+
+    ctk.CTkLabel(
+        header, text=title,
+        font=_FONT_TITLE, text_color=_CLR_TEXT,
+        anchor="w",
+    ).grid(row=0, column=1, sticky="sw")
+
+    if subtitle:
+        ctk.CTkLabel(
+            header, text=subtitle,
+            font=_FONT_SMALL, text_color=_CLR_MUTED,
+            anchor="w",
+        ).grid(row=1, column=1, sticky="nw", pady=(1, 0))
+
+    # Right slot for action widgets
+    right_slot = ctk.CTkFrame(header, fg_color="transparent")
+    right_slot.grid(row=0, column=2, rowspan=2, sticky="e")
+    header.right_slot = right_slot  # type: ignore[attr-defined]
+
+    return header
+
+
+def _stat_card(
+    parent,
+    icon: str,
+    title: str,
+    value: str,
+    column: int,
+    accent: str = _CLR_TEXT,
+) -> "ctk.CTkLabel":
+    """Polished stat card with icon column + value emphasis.
+
+    Returns the value label so the caller can update it via ``.configure``.
+    """
+    card = ctk.CTkFrame(
+        parent,
+        fg_color=_CLR_PANEL,
+        corner_radius=14,
+        border_width=1,
+        border_color=_CLR_BORDER,
+    )
+    card.grid(row=0, column=column, sticky="nsew", padx=6, pady=4)
+    card.grid_columnconfigure(1, weight=1)
+
+    # Icon column
+    icon_lbl = ctk.CTkLabel(
+        card, text=icon, font=(_SF, 22),
+        text_color=accent,
+    )
+    icon_lbl.grid(row=0, column=0, rowspan=2,
+                  padx=(14, 10), pady=10, sticky="w")
+
+    ctk.CTkLabel(
+        card, text=title.upper(),
+        font=(_SF, 9, "bold"),
+        text_color=_CLR_MUTED,
+        anchor="w",
+    ).grid(row=0, column=1, padx=(0, 14), pady=(12, 0), sticky="sw")
+
+    value_lbl = ctk.CTkLabel(
+        card, text=value,
+        font=(_SF, 20, "bold"),
+        text_color=accent,
+        anchor="w",
+    )
+    value_lbl.grid(row=1, column=1, padx=(0, 14), pady=(0, 12), sticky="nw")
+    return value_lbl
 
 
 # ===========================================================================
@@ -257,6 +443,13 @@ class WifiKillerApp(ctk.CTk):
         frame = self._frames.get(name)
         if frame:
             frame.tkraise()
+            # Let the frame refresh itself when it becomes visible.
+            on_show = getattr(frame, "_on_show", None)
+            if callable(on_show):
+                try:
+                    on_show()
+                except Exception:
+                    pass
         self._sidebar.set_active(name)
 
     # ------------------------------------------------------------------ #
@@ -312,6 +505,11 @@ class WifiKillerApp(ctk.CTk):
         dash: DashboardFrame = self._frames.get("dashboard")  # type: ignore
         if dash:
             self.after(0, dash.refresh)
+        # Also refresh the network map when the host list changes — otherwise
+        # the topology stays empty until the user resizes or refreshes manually.
+        nmap: NetworkMapFrame = self._frames.get("network_map")  # type: ignore
+        if nmap:
+            self.after(0, nmap.redraw)
 
     def record_scan(self, host_count: int) -> None:
         """Record a completed scan in the history (kept to last 5)."""
@@ -412,97 +610,138 @@ class WifiKillerApp(ctk.CTk):
 # ===========================================================================
 
 class _Sidebar(ctk.CTkFrame):
-    _NAV = [
-        ("dashboard",    "📊  Dashboard"),
-        ("scan",         "🔍  Scan Network"),
-        ("network_map",  "🗺️   Network Map"),
-        ("multi_subnet", "🌐  Multi-Subnet"),
-        ("dns_sniffer",  "🔎  DNS Sniffer"),
-        ("arp_cache",    "📋  ARP Cache"),
-        ("throttle",     "🚦  Speed Control"),
-        ("ping_monitor", "🏓  Ping Monitor"),
-        ("attack",       "⚡  ARP Attack"),
-        ("anonymize",    "🎭  MAC Anonymize"),
-        ("wol",          "🔆  Wake-on-LAN"),
-        ("settings",     "⚙️   Settings"),
-        ("about",        "ℹ️   About"),
+    # Grouped navigation: (section_label_or_None, [(key, label), ...])
+    _NAV_SECTIONS: list[tuple[Optional[str], list[tuple[str, str]]]] = [
+        (None, [
+            ("dashboard",    "📊   Dashboard"),
+        ]),
+        ("DISCOVERY", [
+            ("scan",         "🔍   Scan Network"),
+            ("network_map",  "🗺️    Network Map"),
+            ("multi_subnet", "🌐   Multi-Subnet"),
+            ("dns_sniffer",  "🔎   DNS Sniffer"),
+            ("arp_cache",    "📋   ARP Cache"),
+            ("ping_monitor", "🏓   Ping Monitor"),
+        ]),
+        ("CONTROL", [
+            ("throttle",     "🚦   Speed Control"),
+            ("attack",       "⚡   ARP Attack"),
+            ("anonymize",    "🎭   MAC Anonymize"),
+            ("wol",          "🔆   Wake-on-LAN"),
+        ]),
+        ("SYSTEM", [
+            ("settings",     "⚙️    Settings"),
+            ("about",        "ℹ️    About"),
+        ]),
     ]
 
     def __init__(self, parent: ctk.CTk, on_select) -> None:
-        super().__init__(parent, fg_color=_CLR_SIDEBAR, corner_radius=0, width=218)
+        super().__init__(parent, fg_color=_CLR_SIDEBAR, corner_radius=0, width=244)
         self._on_select = on_select
-        self._buttons: dict[str, ctk.CTkButton] = {}
+        # For each nav entry we track (stripe_frame, button) so we can recolour
+        # the left-edge accent on selection without rebuilding the widget tree.
+        self._items: dict[str, tuple[ctk.CTkFrame, ctk.CTkButton]] = {}
         self._active: str = ""
         self._build()
 
     def _build(self) -> None:
         self.grid_propagate(False)
 
-        # App logo / title
+        # ── Brand / logo ─────────────────────────────────────────────
         logo_frame = ctk.CTkFrame(self, fg_color="transparent")
-        logo_frame.pack(pady=(26, 2), padx=16, fill="x")
+        logo_frame.pack(pady=(24, 4), padx=18, fill="x")
 
         ctk.CTkLabel(
             logo_frame,
             text="📡",
-            font=(_SF, 26),
+            font=(_SF, 28),
             text_color=_CLR_ACCENT,
-        ).pack(side="left", padx=(0, 8))
+        ).pack(side="left", padx=(0, 10))
 
         title_col = ctk.CTkFrame(logo_frame, fg_color="transparent")
-        title_col.pack(side="left")
+        title_col.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(
             title_col,
             text="Wifi-Killer",
-            font=(_SF, 16, "bold"),
+            font=(_SF, 17, "bold"),
             text_color=_CLR_TEXT,
             anchor="w",
         ).pack(anchor="w")
         ctk.CTkLabel(
             title_col,
-            text="Network Lab Tool",
-            font=(_SF, 9),
+            text=f"v{_VERSION}  ·  Network Lab",
+            font=(_SF, 10),
             text_color=_CLR_MUTED,
             anchor="w",
         ).pack(anchor="w")
 
-        ctk.CTkFrame(self, height=1, fg_color=_CLR_PANEL).pack(
-            fill="x", padx=14, pady=(14, 10))
+        ctk.CTkFrame(self, height=1, fg_color=_CLR_BORDER).pack(
+            fill="x", padx=18, pady=(16, 6))
 
-        for key, label in self._NAV:
-            btn = ctk.CTkButton(
-                self,
-                text=label,
-                anchor="w",
-                fg_color="transparent",
-                hover_color=_CLR_PANEL,
-                text_color=_CLR_TEXT,
-                font=_FONT_LABEL,
-                corner_radius=8,
-                height=40,
-                command=lambda k=key: self._on_select(k),
-            )
-            btn.pack(fill="x", padx=10, pady=1)
-            self._buttons[key] = btn
+        # ── Grouped nav ──────────────────────────────────────────────
+        for section_idx, (section, entries) in enumerate(self._NAV_SECTIONS):
+            if section is not None:
+                ctk.CTkLabel(
+                    self,
+                    text=section,
+                    font=(_SF, 9, "bold"),
+                    text_color=_CLR_MUTED,
+                    anchor="w",
+                ).pack(fill="x", padx=22, pady=(12 if section_idx > 0 else 8, 4))
 
-        # Version label at bottom
-        ver = ctk.CTkLabel(
-            self,
-            text=f"v{_VERSION}  ·  Authorised use only",
-            font=(_SF, 8),
+            for key, label in entries:
+                self._add_nav_item(key, label)
+
+        # ── Footer ───────────────────────────────────────────────────
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(side="bottom", fill="x", pady=(10, 14))
+
+        ctk.CTkFrame(footer, height=1, fg_color=_CLR_BORDER).pack(
+            fill="x", padx=18, pady=(0, 10))
+        ctk.CTkLabel(
+            footer,
+            text="⚠  Authorised use only",
+            font=(_SF, 9),
             text_color=_CLR_MUTED,
+        ).pack(padx=18, anchor="w")
+
+    def _add_nav_item(self, key: str, label: str) -> None:
+        """Build a single nav row: left accent stripe + button."""
+        row = ctk.CTkFrame(self, fg_color="transparent", height=38)
+        row.pack(fill="x", padx=(0, 10), pady=1)
+        row.pack_propagate(False)
+
+        stripe = ctk.CTkFrame(
+            row, fg_color="transparent", width=3, corner_radius=0)
+        stripe.pack(side="left", fill="y", padx=(0, 7))
+        stripe.pack_propagate(False)
+
+        btn = ctk.CTkButton(
+            row,
+            text=label,
+            anchor="w",
+            fg_color="transparent",
+            hover_color=_CLR_HOVER,
+            text_color=_CLR_TEXT,
+            font=_FONT_LABEL,
+            corner_radius=8,
+            height=38,
+            command=lambda k=key: self._on_select(k),
         )
-        ver.pack(side="bottom", pady=12)
+        btn.pack(side="left", fill="both", expand=True)
+        self._items[key] = (stripe, btn)
 
     def set_active(self, key: str) -> None:
-        for k, btn in self._buttons.items():
+        for k, (stripe, btn) in self._items.items():
             if k == key:
+                stripe.configure(fg_color=_CLR_ACCENT)
                 btn.configure(
                     fg_color=_CLR_PANEL,
-                    text_color=_CLR_ACCENT,
-                    font=(_SF, 11, "bold"),
+                    text_color=_CLR_TEXT,
+                    font=(_SF, 12, "bold"),
                 )
             else:
+                stripe.configure(fg_color="transparent")
                 btn.configure(
                     fg_color="transparent",
                     text_color=_CLR_TEXT,
@@ -517,50 +756,98 @@ class _Sidebar(ctk.CTkFrame):
 
 class _TopBar(ctk.CTkFrame):
     def __init__(self, parent, on_iface_change) -> None:
-        super().__init__(parent, fg_color=_CLR_SIDEBAR, corner_radius=0, height=52)
+        super().__init__(parent, fg_color=_CLR_SIDEBAR, corner_radius=0, height=62)
         self._on_iface_change = on_iface_change
         self._iface_var = tk.StringVar()
         self._build()
 
     def _build(self) -> None:
         self.pack_propagate(False)
-        self.grid_columnconfigure(5, weight=1)
+        # Bottom hairline for visual separation from content
+        ctk.CTkFrame(self, height=1, fg_color=_CLR_BORDER).pack(
+            side="bottom", fill="x")
 
-        ctk.CTkLabel(self, text="Interface:", font=_FONT_LABEL, text_color=_CLR_MUTED).grid(
-            row=0, column=0, padx=(16, 4), pady=12)
+        # ── Left side: interface picker ──────────────────────────────
+        left = ctk.CTkFrame(self, fg_color="transparent")
+        left.pack(side="left", fill="y", padx=(20, 0))
+
+        ctk.CTkLabel(
+            left, text="INTERFACE",
+            font=(_SF, 9, "bold"), text_color=_CLR_MUTED,
+        ).pack(side="left", padx=(0, 10), pady=14)
 
         self._combo = ctk.CTkComboBox(
-            self,
+            left,
             variable=self._iface_var,
             values=[],
-            width=160,
+            width=170,
+            height=34,
             command=self._on_iface_change,
             font=_FONT_LABEL,
+            fg_color=_CLR_PANEL,
+            border_color=_CLR_BORDER,
+            border_width=1,
+            button_color=_CLR_PANEL,
+            button_hover_color=_CLR_HOVER,
+            dropdown_fg_color=_CLR_PANEL,
+            dropdown_hover_color=_CLR_HOVER,
         )
-        self._combo.grid(row=0, column=1, padx=(0, 16), pady=12)
+        self._combo.pack(side="left", pady=14)
         _ToolTip(self._combo, "Select the network interface to use for all operations")
 
-        ctk.CTkLabel(self, text="Gateway:", font=_FONT_LABEL, text_color=_CLR_MUTED).grid(
-            row=0, column=2, padx=(0, 4), pady=12)
-
-        self._gw_label = ctk.CTkLabel(
-            self, text="—", font=_FONT_LABEL, text_color=_CLR_SUCCESS)
-        self._gw_label.grid(row=0, column=3, padx=(0, 24), pady=12, sticky="w")
-
-        ctk.CTkLabel(self, text="My IP:", font=_FONT_LABEL, text_color=_CLR_MUTED).grid(
-            row=0, column=4, padx=(0, 4), pady=12)
-
-        self._ip_label = ctk.CTkLabel(
-            self, text="—", font=_FONT_LABEL, text_color=_CLR_WARNING)
-        self._ip_label.grid(row=0, column=5, padx=(0, 16), pady=12, sticky="w")
-
-        # Keyboard shortcut hint on right
+        # ── Right side: keyboard hint pill ───────────────────────────
         hint = ctk.CTkLabel(
             self,
-            text="F5=Scan  Ctrl+A=Select All  Esc=Stop  Ctrl+Q=Quit  Ctrl+E=Export",
-            font=(_SF, 8), text_color=_CLR_MUTED,
+            text="F5  Scan    Ctrl+A  Select all    Esc  Stop    Ctrl+E  Export",
+            font=(_SF, 9), text_color=_CLR_MUTED,
         )
-        hint.grid(row=0, column=6, padx=(0, 16), pady=12, sticky="e")
+        hint.pack(side="right", padx=(0, 20), pady=14)
+
+        # ── Center: status pills (gateway, my IP) ────────────────────
+        center = ctk.CTkFrame(self, fg_color="transparent")
+        center.pack(side="left", padx=(24, 0), pady=14)
+
+        self._gw_dot, self._gw_label = self._make_pill(
+            center, "Gateway", "—", _CLR_MUTED)
+        self._gw_pill_container = self._gw_label.master
+        self._gw_pill_container.pack(side="left", padx=(0, 10))
+
+        self._ip_dot, self._ip_label = self._make_pill(
+            center, "My IP", "—", _CLR_MUTED)
+        self._ip_label.master.pack(side="left", padx=(0, 10))
+
+    def _make_pill(
+        self,
+        parent,
+        caption: str,
+        value: str,
+        dot_color: str,
+    ) -> tuple[ctk.CTkLabel, ctk.CTkLabel]:
+        """Return (status_dot_label, value_label) for a pill-style chip."""
+        pill = ctk.CTkFrame(
+            parent,
+            fg_color=_CLR_PANEL,
+            corner_radius=999,
+            border_width=1,
+            border_color=_CLR_BORDER,
+            height=32,
+        )
+        pill.pack_propagate(False)
+
+        dot = ctk.CTkLabel(
+            pill, text="●", font=(_SF, 11), text_color=dot_color)
+        dot.pack(side="left", padx=(12, 4), pady=2)
+
+        ctk.CTkLabel(
+            pill, text=caption,
+            font=(_SF, 9, "bold"),
+            text_color=_CLR_MUTED,
+        ).pack(side="left", padx=(0, 6), pady=2)
+
+        value_lbl = ctk.CTkLabel(
+            pill, text=value, font=_FONT_LABEL, text_color=_CLR_TEXT)
+        value_lbl.pack(side="left", padx=(0, 14), pady=2)
+        return dot, value_lbl
 
     def populate_interfaces(self, ifaces: list[str], selected: str) -> None:
         self._combo.configure(values=ifaces)
@@ -568,10 +855,20 @@ class _TopBar(ctk.CTkFrame):
             self._iface_var.set(selected)
 
     def set_gateway(self, gw: str) -> None:
-        self._gw_label.configure(text=gw or "unknown")
+        if gw:
+            self._gw_label.configure(text=gw)
+            self._gw_dot.configure(text_color=_CLR_SUCCESS)
+        else:
+            self._gw_label.configure(text="unknown")
+            self._gw_dot.configure(text_color=_CLR_WARNING)
 
     def set_own_ip(self, ip: str) -> None:
-        self._ip_label.configure(text=ip or "—")
+        if ip and ip != "—" and ip != "?":
+            self._ip_label.configure(text=ip)
+            self._ip_dot.configure(text_color=_CLR_ACCENT2)
+        else:
+            self._ip_label.configure(text=ip or "—")
+            self._ip_dot.configure(text_color=_CLR_MUTED)
 
 
 # ===========================================================================
@@ -592,94 +889,113 @@ class ScanFrame(ctk.CTkFrame):
         self._build()
 
     def _build(self) -> None:
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # ── Top controls ──────────────────────────────────────────────
-        ctrl = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
-        ctrl.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 8))
+        # ── Page header ───────────────────────────────────────────────
+        header = _page_header(
+            self,
+            icon="🔍",
+            title="Scan Network",
+            subtitle="Discover live hosts on your network and inspect their details",
+        )
+        header.grid(row=0, column=0, sticky="ew", padx=24, pady=(22, 14))
+
+        # host count badge in the right slot
+        self._count_label = ctk.CTkLabel(
+            header.right_slot, text="No hosts yet",
+            font=(_SF, 10, "bold"), text_color=_CLR_MUTED,
+        )
+        self._count_label.pack(side="right", padx=(0, 2))
+
+        # ── Top controls card ─────────────────────────────────────────
+        ctrl = ctk.CTkFrame(
+            self, fg_color=_CLR_PANEL, corner_radius=14,
+            border_width=1, border_color=_CLR_BORDER,
+        )
+        ctrl.grid(row=1, column=0, sticky="ew", padx=24, pady=(0, 12))
         ctrl.grid_columnconfigure(6, weight=1)
 
-        ctk.CTkLabel(ctrl, text="Scan type:", font=_FONT_LABEL, text_color=_CLR_MUTED).grid(
-            row=0, column=0, padx=(16, 4), pady=12)
+        ctk.CTkLabel(
+            ctrl, text="SCAN TYPE",
+            font=(_SF, 9, "bold"), text_color=_CLR_MUTED,
+        ).grid(row=0, column=0, padx=(18, 8), pady=(16, 14))
 
         self._scan_type = ctk.CTkComboBox(
             ctrl,
             values=["Fast (ARP)", "Balanced (ARP+ICMP)", "Stealth (TCP SYN)"],
-            width=190,
+            width=200, height=36,
             font=_FONT_LABEL,
+            fg_color=_CLR_SIDEBAR,
+            border_color=_CLR_BORDER,
+            border_width=1,
+            button_color=_CLR_SIDEBAR,
+            button_hover_color=_CLR_HOVER,
+            dropdown_fg_color=_CLR_PANEL,
+            dropdown_hover_color=_CLR_HOVER,
             command=self._on_scan_type_changed,
         )
         self._scan_type.set("Fast (ARP)")
-        self._scan_type.grid(row=0, column=1, padx=(0, 12), pady=12)
+        self._scan_type.grid(row=0, column=1, padx=(0, 12), pady=(16, 14))
         _ToolTip(self._scan_type,
                  "Fast=ARP only  |  Balanced=ARP+ICMP  |  Stealth=TCP SYN (slow, needs root)")
 
-        self._scan_btn = ctk.CTkButton(
-            ctrl, text="▶  Start Scan", fg_color=_CLR_ACCENT,
-            hover_color="#c73652", font=_FONT_LABEL, width=130,
-            command=self._start_scan,
+        self._scan_btn = _primary_button(
+            ctrl, text="▶   Start Scan",
+            command=self._start_scan, width=140, height=36,
         )
-        self._scan_btn.grid(row=0, column=2, padx=(0, 8), pady=12)
+        self._scan_btn.grid(row=0, column=2, padx=(0, 8), pady=(16, 14))
         _ToolTip(self._scan_btn, "Start scanning the local network for devices  (F5)")
 
-        self._monitor_btn = ctk.CTkButton(
-            ctrl, text="📡  Monitor", fg_color=_CLR_ACCENT2,
-            hover_color="#6b44a8", font=_FONT_LABEL, width=120,
-            command=self._toggle_monitor,
+        self._monitor_btn = _secondary_button(
+            ctrl, text="📡   Monitor",
+            command=self._toggle_monitor, width=120, height=36,
         )
-        self._monitor_btn.grid(row=0, column=3, padx=(0, 8), pady=12)
+        self._monitor_btn.configure(border_color=_CLR_ACCENT2)
+        self._monitor_btn.grid(row=0, column=3, padx=(0, 8), pady=(16, 14))
         _ToolTip(self._monitor_btn, "Continuously monitor for devices joining or leaving the network")
 
-        self._export_btn = ctk.CTkButton(
-            ctrl, text="💾  Export", fg_color=_CLR_PANEL,
-            hover_color="#1a4a80", font=_FONT_LABEL, width=110,
-            command=self._export_results,
+        self._export_btn = _ghost_button(
+            ctrl, text="💾   Export",
+            command=self._export_results, width=110, height=36,
         )
-        self._export_btn.grid(row=0, column=4, padx=(0, 8), pady=12)
+        self._export_btn.grid(row=0, column=4, padx=(0, 8), pady=(16, 14))
         _ToolTip(self._export_btn, "Save scan results to CSV or JSON  (Ctrl+E)")
 
-        self._import_btn = ctk.CTkButton(
-            ctrl, text="📂  Import", fg_color=_CLR_PANEL,
-            hover_color="#1a4a80", font=_FONT_LABEL, width=110,
-            command=self._import_hosts,
+        self._import_btn = _ghost_button(
+            ctrl, text="📂   Import",
+            command=self._import_hosts, width=110, height=36,
         )
-        self._import_btn.grid(row=0, column=5, padx=(0, 8), pady=12)
+        self._import_btn.grid(row=0, column=5, padx=(0, 8), pady=(16, 14))
         _ToolTip(self._import_btn, "Load hosts from a CSV, JSON, or plain-text file (one IP per line)")
 
-        self._attack_sel_btn = ctk.CTkButton(
-            ctrl, text="⚡  Attack Selected", fg_color="#7b3f00",
-            hover_color="#a05000", font=_FONT_LABEL, width=150,
-            command=self._go_attack_selected,
+        self._attack_sel_btn = _danger_button(
+            ctrl, text="⚡   Attack Selected",
+            command=self._go_attack_selected, width=170, height=36,
         )
-        self._attack_sel_btn.grid(row=0, column=6, padx=(0, 16), pady=12)
+        self._attack_sel_btn.grid(row=0, column=6, padx=(0, 18), pady=(16, 14), sticky="e")
         _ToolTip(self._attack_sel_btn, "Send selected hosts to the ARP Attack frame")
-
-        # host count label
-        self._count_label = ctk.CTkLabel(
-            ctrl, text="No hosts yet", font=_FONT_SMALL, text_color=_CLR_MUTED)
-        self._count_label.grid(row=0, column=7, padx=8, sticky="e")
 
         # ── Second row: select-all / copy-IPs + optional stealth ports ──
         row2 = ctk.CTkFrame(ctrl, fg_color="transparent")
-        row2.grid(row=1, column=0, columnspan=7, sticky="ew", padx=12, pady=(0, 8))
+        row2.grid(row=1, column=0, columnspan=7, sticky="ew", padx=14, pady=(0, 10))
 
-        ctk.CTkButton(
-            row2, text="☑  Select All", width=110, height=28,
-            fg_color=_CLR_PANEL, hover_color=_CLR_ACCENT2,
-            font=_FONT_SMALL, command=self._select_all,
+        _ghost_button(
+            row2, text="☑   Select All",
+            command=self._select_all, width=110, height=30,
+            font=_FONT_SMALL,
         ).pack(side="left", padx=(0, 6))
 
-        ctk.CTkButton(
-            row2, text="☐  Deselect All", width=120, height=28,
-            fg_color=_CLR_PANEL, hover_color=_CLR_ACCENT2,
-            font=_FONT_SMALL, command=self._deselect_all,
-        ).pack(side="left", padx=(0, 16))
+        _ghost_button(
+            row2, text="☐   Deselect All",
+            command=self._deselect_all, width=120, height=30,
+            font=_FONT_SMALL,
+        ).pack(side="left", padx=(0, 12))
 
-        ctk.CTkButton(
-            row2, text="📋  Copy All IPs", width=120, height=28,
-            fg_color=_CLR_PANEL, hover_color=_CLR_ACCENT2,
-            font=_FONT_SMALL, command=self._copy_all_ips,
+        _ghost_button(
+            row2, text="📋   Copy All IPs",
+            command=self._copy_all_ips, width=130, height=30,
+            font=_FONT_SMALL,
         ).pack(side="left", padx=(0, 16))
 
         # Custom ports for Stealth scan
@@ -696,86 +1012,108 @@ class ScanFrame(ctk.CTkFrame):
 
         # ── Search / filter bar ────────────────────────────────────────
         flt = ctk.CTkFrame(ctrl, fg_color="transparent")
-        flt.grid(row=2, column=0, columnspan=7, sticky="ew", padx=12, pady=(0, 8))
+        flt.grid(row=2, column=0, columnspan=7, sticky="ew", padx=14, pady=(0, 14))
         flt.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(flt, text="🔎  Filter:", font=_FONT_LABEL,
-                     text_color=_CLR_MUTED).grid(row=0, column=0, padx=(0, 6))
+        ctk.CTkLabel(
+            flt, text="🔎   Filter",
+            font=(_SF, 10, "bold"), text_color=_CLR_MUTED,
+        ).grid(row=0, column=0, padx=(0, 10))
         self._filter_var = tk.StringVar()
         self._filter_var.trace_add("write", lambda *_: self._apply_filter())
         self._filter_entry = ctk.CTkEntry(
             flt, textvariable=self._filter_var,
             placeholder_text="Type IP, vendor, hostname, or device type…",
-            font=_FONT_LABEL, height=30,
+            font=_FONT_LABEL, height=32,
+            fg_color=_CLR_SIDEBAR,
+            border_color=_CLR_BORDER,
+            border_width=1,
         )
         self._filter_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8))
-        ctk.CTkButton(
-            flt, text="✕", width=30, height=30,
-            fg_color=_CLR_PANEL, hover_color=_CLR_DANGER,
-            font=_FONT_LABEL,
+        _ghost_button(
+            flt, text="✕", width=32, height=32,
             command=lambda: self._filter_var.set(""),
+            font=_FONT_LABEL,
         ).grid(row=0, column=2)
 
-        # ── Host table ────────────────────────────────────────────────
-        tbl_frame = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
-        tbl_frame.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 8))
+        # ── Host table card ───────────────────────────────────────────
+        tbl_frame = ctk.CTkFrame(
+            self, fg_color=_CLR_PANEL, corner_radius=14,
+            border_width=1, border_color=_CLR_BORDER,
+        )
+        tbl_frame.grid(row=2, column=0, sticky="nsew", padx=24, pady=(0, 10))
         tbl_frame.grid_rowconfigure(1, weight=1)
         tbl_frame.grid_columnconfigure(0, weight=1)
 
         # Header row
-        hdr = ctk.CTkFrame(tbl_frame, fg_color=_CLR_PANEL, corner_radius=0)
-        hdr.grid(row=0, column=0, sticky="ew")
+        hdr = ctk.CTkFrame(tbl_frame, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=2, pady=(2, 0))
         for ci, col in enumerate(self._COLS):
             ctk.CTkLabel(
-                hdr, text=col, font=(_SF, 10, "bold"),
-                text_color=_CLR_ACCENT, anchor="w",
-            ).grid(row=0, column=ci, padx=(12 if ci == 0 else 4, 4), pady=8, sticky="w")
+                hdr, text=col.upper(),
+                font=(_SF, 9, "bold"),
+                text_color=_CLR_MUTED, anchor="w",
+            ).grid(row=0, column=ci, padx=(14 if ci == 0 else 6, 4), pady=10, sticky="w")
         hdr.grid_columnconfigure(len(self._COLS) - 1, weight=1)
+
+        ctk.CTkFrame(tbl_frame, height=1, fg_color=_CLR_BORDER).grid(
+            row=0, column=0, sticky="sew", padx=10)
 
         # Scrollable body
         self._table_body = ctk.CTkScrollableFrame(
-            tbl_frame, fg_color=_CLR_BG, corner_radius=0)
-        self._table_body.grid(row=1, column=0, sticky="nsew")
+            tbl_frame, fg_color="transparent", corner_radius=0)
+        self._table_body.grid(row=1, column=0, sticky="nsew", padx=4, pady=(2, 4))
         self._table_body.grid_columnconfigure(0, weight=1)
 
         self._row_frames: list[_HostRow] = []
 
-        # ── Log console ───────────────────────────────────────────────
-        log_frame = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
-        log_frame.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 18))
+        # ── Log console card ──────────────────────────────────────────
+        log_frame = ctk.CTkFrame(
+            self, fg_color=_CLR_PANEL, corner_radius=14,
+            border_width=1, border_color=_CLR_BORDER,
+        )
+        log_frame.grid(row=3, column=0, sticky="ew", padx=24, pady=(0, 22))
         log_frame.grid_columnconfigure(0, weight=1)
 
         log_hdr = ctk.CTkFrame(log_frame, fg_color="transparent")
-        log_hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(8, 2))
+        log_hdr.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 4))
         log_hdr.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(log_hdr, text="Activity Log", font=(_SF, 10, "bold"),
-                     text_color=_CLR_ACCENT).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            log_hdr, text="Activity Log",
+            font=_FONT_HEAD, text_color=_CLR_TEXT,
+        ).grid(row=0, column=0, sticky="w")
 
-        ctk.CTkButton(
-            log_hdr, text="💾 Export Log", width=100, height=24,
-            fg_color=_CLR_PANEL, hover_color=_CLR_ACCENT2,
-            font=_FONT_SMALL, command=self._export_log,
+        _ghost_button(
+            log_hdr, text="💾   Export Log",
+            command=self._export_log, width=120, height=28,
+            font=_FONT_SMALL,
         ).grid(row=0, column=1, padx=(0, 6))
 
-        ctk.CTkButton(
-            log_hdr, text="🗑 Clear", width=70, height=24,
-            fg_color="#4a1010", hover_color=_CLR_DANGER,
-            font=_FONT_SMALL, command=self._clear_log,
+        _ghost_button(
+            log_hdr, text="🗑   Clear",
+            command=self._clear_log, width=80, height=28,
+            font=_FONT_SMALL,
         ).grid(row=0, column=2)
 
         self._log_text = ctk.CTkTextbox(
-            log_frame, height=130, font=_FONT_MONO,
-            fg_color="#0d0d1a", text_color=_CLR_SUCCESS,
+            log_frame, height=140, font=_FONT_MONO,
+            fg_color=_CLR_BG, text_color=_CLR_SUCCESS,
             scrollbar_button_color=_CLR_PANEL,
+            border_width=1, border_color=_CLR_BORDER,
+            corner_radius=10,
         )
-        self._log_text.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
+        self._log_text.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 14))
         self._log_text.configure(state="disabled")
 
         # Progress bar (hidden by default)
-        self._progress = ctk.CTkProgressBar(self, mode="indeterminate",
-                                             fg_color=_CLR_SIDEBAR,
-                                             progress_color=_CLR_ACCENT)
+        self._progress = ctk.CTkProgressBar(
+            self, mode="indeterminate",
+            fg_color=_CLR_PANEL,
+            progress_color=_CLR_ACCENT,
+            corner_radius=999,
+            height=4,
+        )
 
     # ── Scan ──────────────────────────────────────────────────────────
 
@@ -787,7 +1125,7 @@ class ScanFrame(ctk.CTkFrame):
             return
         self._scanning = True
         self._scan_btn.configure(state="disabled", text="Scanning…")
-        self._progress.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 4))
+        self._progress.grid(row=4, column=0, sticky="ew", padx=24, pady=(0, 6))
         self._progress.start()
         self._clear_table()
         self._app.log(f"Starting {self._scan_type.get()} on {self._app._iface} …")
@@ -1641,89 +1979,139 @@ class AttackFrame(ctk.CTkFrame):
         self._target_label.configure(text=names or "None selected")
 
     def _build(self) -> None:
-        self.grid_rowconfigure(3, weight=1)
+        self.grid_rowconfigure(4, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # Title
-        ctk.CTkLabel(
-            self, text="⚡  ARP Attack / Control",
-            font=_FONT_TITLE, text_color=_CLR_ACCENT,
-        ).grid(row=0, column=0, padx=28, pady=(24, 4), sticky="w")
-
-        ctk.CTkLabel(
+        # ── Page header ───────────────────────────────────────────────
+        header = _page_header(
             self,
-            text="ARP-spoofing attacks for authorised network testing only.",
-            font=_FONT_SMALL, text_color=_CLR_MUTED,
-        ).grid(row=1, column=0, padx=28, pady=(0, 16), sticky="w")
+            icon="⚡",
+            title="ARP Attack",
+            subtitle="ARP-spoofing attacks — authorised network testing only",
+        )
+        header.grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 14))
 
-        # Config panel
-        panel = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
-        panel.grid(row=2, column=0, padx=28, pady=0, sticky="ew")
+        # ── Hazard banner ─────────────────────────────────────────────
+        banner = ctk.CTkFrame(
+            self,
+            fg_color=_shade(_CLR_DANGER, 0.25),
+            corner_radius=12,
+            border_width=1,
+            border_color=_CLR_DANGER,
+        )
+        banner.grid(row=1, column=0, sticky="ew", padx=28, pady=(0, 16))
+        ctk.CTkLabel(
+            banner,
+            text="⚠   Destructive: this will impersonate the gateway on your LAN. "
+                 "Only run on networks you own or have explicit permission to test.",
+            font=(_SF, 11, "bold"),
+            text_color="#ffd6dc",
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=10)
+
+        # ── Config card ───────────────────────────────────────────────
+        panel = ctk.CTkFrame(
+            self, fg_color=_CLR_PANEL, corner_radius=14,
+            border_width=1, border_color=_CLR_BORDER,
+        )
+        panel.grid(row=2, column=0, padx=28, sticky="ew")
         panel.grid_columnconfigure(1, weight=1)
 
         # Targets row
-        ctk.CTkLabel(panel, text="Targets:", font=_FONT_LABEL,
-                     text_color=_CLR_MUTED).grid(row=0, column=0, padx=16, pady=(16, 8), sticky="w")
+        ctk.CTkLabel(
+            panel, text="TARGETS",
+            font=(_SF, 9, "bold"), text_color=_CLR_MUTED,
+        ).grid(row=0, column=0, padx=(18, 12), pady=(18, 10), sticky="w")
         self._target_label = ctk.CTkLabel(
             panel, text="None – go to Scan tab and select hosts",
-            font=_FONT_LABEL, text_color=_CLR_WARNING)
-        self._target_label.grid(row=0, column=1, padx=8, pady=(16, 8), sticky="w")
+            font=_FONT_LABEL, text_color=_CLR_WARNING, anchor="w",
+        )
+        self._target_label.grid(row=0, column=1, padx=8, pady=(18, 10), sticky="w")
 
-        ctk.CTkButton(
-            panel, text="Use All Scanned Hosts", width=180,
-            fg_color=_CLR_PANEL, hover_color=_CLR_ACCENT2,
-            font=_FONT_LABEL, command=self._use_all_hosts,
-        ).grid(row=0, column=2, padx=16, pady=(16, 8))
+        _secondary_button(
+            panel, text="Use All Scanned Hosts",
+            command=self._use_all_hosts, width=190, height=34,
+        ).grid(row=0, column=2, padx=18, pady=(18, 10))
 
         # Method
-        ctk.CTkLabel(panel, text="Method:", font=_FONT_LABEL,
-                     text_color=_CLR_MUTED).grid(row=1, column=0, padx=16, pady=8, sticky="w")
+        ctk.CTkLabel(
+            panel, text="METHOD",
+            font=(_SF, 9, "bold"), text_color=_CLR_MUTED,
+        ).grid(row=1, column=0, padx=(18, 12), pady=10, sticky="w")
         self._method = ctk.CTkComboBox(
-            panel, width=280, font=_FONT_LABEL,
+            panel, width=320, height=36, font=_FONT_LABEL,
             values=[
                 "A – Full MITM (bi-directional)",
                 "B – Cut Client Only",
                 "C – Cut Gateway Only",
             ],
+            fg_color=_CLR_SIDEBAR,
+            border_color=_CLR_BORDER,
+            border_width=1,
+            button_color=_CLR_SIDEBAR,
+            button_hover_color=_CLR_HOVER,
+            dropdown_fg_color=_CLR_PANEL,
+            dropdown_hover_color=_CLR_HOVER,
         )
         self._method.set("A – Full MITM (bi-directional)")
-        self._method.grid(row=1, column=1, padx=8, pady=8, sticky="w")
+        self._method.grid(row=1, column=1, padx=8, pady=10, sticky="w")
 
         # Gateway override
-        ctk.CTkLabel(panel, text="Gateway IP:", font=_FONT_LABEL,
-                     text_color=_CLR_MUTED).grid(row=2, column=0, padx=16, pady=8, sticky="w")
-        self._gw_entry = ctk.CTkEntry(panel, width=180, font=_FONT_LABEL,
-                                      placeholder_text="auto-detected")
-        self._gw_entry.grid(row=2, column=1, padx=8, pady=8, sticky="w")
+        ctk.CTkLabel(
+            panel, text="GATEWAY IP",
+            font=(_SF, 9, "bold"), text_color=_CLR_MUTED,
+        ).grid(row=2, column=0, padx=(18, 12), pady=10, sticky="w")
+        self._gw_entry = ctk.CTkEntry(
+            panel, width=200, height=36, font=_FONT_LABEL,
+            placeholder_text="auto-detected",
+            fg_color=_CLR_SIDEBAR,
+            border_color=_CLR_BORDER,
+            border_width=1,
+        )
+        self._gw_entry.grid(row=2, column=1, padx=8, pady=10, sticky="w")
 
         # Buttons
         btn_row = ctk.CTkFrame(panel, fg_color="transparent")
-        btn_row.grid(row=3, column=0, columnspan=3, padx=16, pady=(12, 16), sticky="w")
+        btn_row.grid(row=3, column=0, columnspan=3,
+                     padx=18, pady=(14, 18), sticky="w")
 
-        self._start_btn = ctk.CTkButton(
-            btn_row, text="⚡  Launch Attack",
-            fg_color=_CLR_ACCENT, hover_color="#c73652",
-            font=_FONT_LABEL, width=150, command=self._start_attack,
+        self._start_btn = _danger_button(
+            btn_row, text="⚡   Launch Attack",
+            command=self._start_attack, width=170,
         )
         self._start_btn.pack(side="left", padx=(0, 12))
 
-        self._stop_btn = ctk.CTkButton(
-            btn_row, text="⏹  Stop & Restore",
-            fg_color=_CLR_PANEL, hover_color="#c73652",
-            font=_FONT_LABEL, width=150, state="disabled",
-            command=self._stop_attack,
+        self._stop_btn = _secondary_button(
+            btn_row, text="⏹   Stop & Restore",
+            command=self._stop_attack, width=170, height=40,
+            state="disabled",
         )
         self._stop_btn.pack(side="left")
 
-        # Status
-        self._status_label = ctk.CTkLabel(
-            self, text="Idle", font=_FONT_LABEL, text_color=_CLR_MUTED)
-        self._status_label.grid(row=3, column=0, padx=28, pady=(20, 0), sticky="w")
+        # ── Status card ───────────────────────────────────────────────
+        status_card = ctk.CTkFrame(
+            self, fg_color=_CLR_PANEL, corner_radius=14,
+            border_width=1, border_color=_CLR_BORDER,
+        )
+        status_card.grid(row=3, column=0, padx=28, pady=(18, 0), sticky="ew")
+        status_card.grid_columnconfigure(0, weight=1)
 
-        # Packet counter
+        ctk.CTkLabel(
+            status_card, text="STATUS",
+            font=(_SF, 9, "bold"), text_color=_CLR_MUTED, anchor="w",
+        ).grid(row=0, column=0, padx=18, pady=(14, 0), sticky="w")
+
+        self._status_label = ctk.CTkLabel(
+            status_card, text="Idle",
+            font=(_SF, 15, "bold"), text_color=_CLR_MUTED, anchor="w",
+        )
+        self._status_label.grid(row=1, column=0, padx=18, pady=(2, 4), sticky="w")
+
         self._pkt_label = ctk.CTkLabel(
-            self, text="", font=_FONT_MONO, text_color=_CLR_SUCCESS)
-        self._pkt_label.grid(row=4, column=0, padx=28, pady=(4, 0), sticky="w")
+            status_card, text="",
+            font=_FONT_MONO, text_color=_CLR_SUCCESS, anchor="w",
+        )
+        self._pkt_label.grid(row=2, column=0, padx=18, pady=(0, 14), sticky="w")
 
         self._timer_id = None
 
@@ -2136,118 +2524,126 @@ class DashboardFrame(ctk.CTkFrame):
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # Title
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 0))
-        header.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            header, text="📊  Dashboard",
-            font=_FONT_TITLE, text_color=_CLR_ACCENT,
-        ).grid(row=0, column=0, sticky="w")
+        # ── Page header ───────────────────────────────────────────────
+        header = _page_header(
+            self,
+            icon="📊",
+            title="Dashboard",
+            subtitle="Live overview of your network and active operations",
+        )
+        header.grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 4))
 
         self._last_refresh_label = ctk.CTkLabel(
-            header, text="", font=_FONT_SMALL, text_color=_CLR_MUTED)
-        self._last_refresh_label.grid(row=0, column=1, sticky="e")
+            header.right_slot, text="",
+            font=_FONT_SMALL, text_color=_CLR_MUTED,
+        )
+        self._last_refresh_label.pack(side="right", padx=(0, 2))
 
         # ── Stat cards ────────────────────────────────────────────────
         cards_frame = ctk.CTkFrame(self, fg_color="transparent")
-        cards_frame.grid(row=1, column=0, sticky="ew", padx=22, pady=(14, 10))
+        cards_frame.grid(row=1, column=0, sticky="ew", padx=22, pady=(18, 14))
         for i in range(5):
-            cards_frame.grid_columnconfigure(i, weight=1)
+            cards_frame.grid_columnconfigure(i, weight=1, uniform="cards")
 
-        self._card_hosts   = self._make_card(cards_frame, "🖥️  Hosts Found",    "0",          0)
-        self._card_iface   = self._make_card(cards_frame, "📡  Interface",       "—",          1)
-        self._card_gw      = self._make_card(cards_frame, "🌐  Gateway",         "—",          2)
-        self._card_monitor = self._make_card(cards_frame, "👁️  Monitor",         "Idle",       3)
-        self._card_attack  = self._make_card(cards_frame, "⚡  Active Attack",   "None",       4)
+        self._card_hosts   = _stat_card(cards_frame, "🖥️", "Hosts Found",   "0",    0, _CLR_SUCCESS)
+        self._card_iface   = _stat_card(cards_frame, "📡", "Interface",     "—",    1, _CLR_TEXT)
+        self._card_gw      = _stat_card(cards_frame, "🌐", "Gateway",       "—",    2, _CLR_ACCENT2)
+        self._card_monitor = _stat_card(cards_frame, "👁",  "Monitor",       "Idle", 3, _CLR_MUTED)
+        self._card_attack  = _stat_card(cards_frame, "⚡", "Active Attack", "None", 4, _CLR_MUTED)
 
         # ── Recent devices + Quick actions ────────────────────────────
         body = ctk.CTkFrame(self, fg_color="transparent")
-        body.grid(row=2, column=0, sticky="nsew", padx=22, pady=(0, 18))
+        body.grid(row=2, column=0, sticky="nsew", padx=22, pady=(0, 22))
         body.grid_rowconfigure(0, weight=1)
         body.grid_columnconfigure(0, weight=3)
         body.grid_columnconfigure(1, weight=1)
 
-        # Recent devices table
-        recent = ctk.CTkFrame(body, fg_color=_CLR_SIDEBAR, corner_radius=12)
-        recent.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        # ── Recent devices card ───────────────────────────────────────
+        recent = ctk.CTkFrame(
+            body, fg_color=_CLR_PANEL, corner_radius=14,
+            border_width=1, border_color=_CLR_BORDER,
+        )
+        recent.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
         recent.grid_rowconfigure(2, weight=1)
         recent.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(recent, text="Recent Devices",
-                     font=_FONT_HEAD, text_color=_CLR_TEXT).grid(
-            row=0, column=0, padx=16, pady=(14, 6), sticky="w")
+        rec_title = ctk.CTkFrame(recent, fg_color="transparent")
+        rec_title.grid(row=0, column=0, sticky="ew", padx=20, pady=(16, 4))
+        rec_title.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            rec_title, text="Recent Devices",
+            font=_FONT_HEAD, text_color=_CLR_TEXT, anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            rec_title, text="Latest 8",
+            font=(_SF, 9, "bold"), text_color=_CLR_MUTED, anchor="e",
+        ).grid(row=0, column=1, sticky="e")
 
-        hdr = ctk.CTkFrame(recent, fg_color=_CLR_PANEL, corner_radius=0)
-        hdr.grid(row=1, column=0, sticky="ew")
-        for ci, col in enumerate(("Device / Hostname", "IP Address", "Vendor", "Type")):
-            ctk.CTkLabel(hdr, text=col,
-                         font=(_SF, 10, "bold"),
-                         text_color=_CLR_ACCENT, anchor="w").grid(
-                row=0, column=ci,
-                padx=(14 if ci == 0 else 8, 4), pady=7, sticky="w")
-        hdr.grid_columnconfigure(3, weight=1)
+        ctk.CTkFrame(recent, height=1, fg_color=_CLR_BORDER).grid(
+            row=1, column=0, sticky="ew", padx=14, pady=(8, 0))
 
         self._recent_body = ctk.CTkScrollableFrame(
-            recent, fg_color=_CLR_BG, corner_radius=0)
-        self._recent_body.grid(row=2, column=0, sticky="nsew")
+            recent, fg_color="transparent", corner_radius=0)
+        self._recent_body.grid(row=2, column=0, sticky="nsew",
+                               padx=10, pady=(8, 12))
         self._recent_body.grid_columnconfigure(0, weight=1)
 
-        # Quick actions
-        qa = ctk.CTkFrame(body, fg_color=_CLR_SIDEBAR, corner_radius=12)
+        # ── Quick actions card ────────────────────────────────────────
+        qa = ctk.CTkFrame(
+            body, fg_color=_CLR_PANEL, corner_radius=14,
+            border_width=1, border_color=_CLR_BORDER,
+        )
         qa.grid(row=0, column=1, sticky="nsew")
         qa.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(qa, text="Quick Actions",
-                     font=_FONT_HEAD, text_color=_CLR_TEXT).pack(
-            padx=16, pady=(14, 10), anchor="w")
+        ctk.CTkLabel(
+            qa, text="Quick Actions",
+            font=_FONT_HEAD, text_color=_CLR_TEXT,
+        ).pack(padx=20, pady=(16, 4), anchor="w")
+        ctk.CTkLabel(
+            qa, text="Jump straight to any tool",
+            font=_FONT_SMALL, text_color=_CLR_MUTED,
+        ).pack(padx=20, pady=(0, 12), anchor="w")
 
-        for label, key, color in [
-            ("🔍  Run Fast Scan",      "scan",         _CLR_ACCENT),
-            ("🌐  Multi-Subnet Scan",  "multi_subnet", _CLR_PANEL),
-            ("⚡  ARP Attack",         "attack",       "#7b3f00"),
-            ("🚦  Speed Control",      "throttle",     _CLR_ACCENT2),
-            ("🏓  Ping Monitor",       "ping_monitor", _CLR_PANEL),
-            ("🎭  MAC Anonymize",      "anonymize",    _CLR_PANEL),
-        ]:
-            ctk.CTkButton(
-                qa, text=label, fg_color=color,
-                hover_color=_CLR_ACCENT2, font=_FONT_LABEL,
-                height=36, anchor="w",
-                command=lambda k=key: self._app._show_frame(k),
-            ).pack(fill="x", padx=12, pady=4)
+        ctk.CTkFrame(qa, height=1, fg_color=_CLR_BORDER).pack(
+            fill="x", padx=14, pady=(0, 10))
 
-        ctk.CTkFrame(qa, height=1, fg_color=_CLR_PANEL).pack(fill="x", padx=12, pady=8)
-
-        ctk.CTkButton(
-            qa, text="▶  Start Scan Now",
-            fg_color=_CLR_ACCENT, hover_color="#c73652",
-            font=_FONT_LABEL, height=40,
+        # Featured primary action
+        _primary_button(
+            qa, text="▶   Start Scan Now",
             command=self._quick_scan,
-        ).pack(fill="x", padx=12, pady=(0, 8))
+            height=44,
+        ).pack(fill="x", padx=14, pady=(0, 12))
 
-        # Scan history
-        ctk.CTkFrame(qa, height=1, fg_color=_CLR_PANEL).pack(fill="x", padx=12, pady=(4, 8))
-        ctk.CTkLabel(qa, text="Scan History",
-                     font=_FONT_HEAD, text_color=_CLR_TEXT).pack(
-            padx=16, pady=(0, 6), anchor="w")
+        # Secondary actions
+        for label, key in [
+            ("🌐   Multi-Subnet Scan",  "multi_subnet"),
+            ("🏓   Ping Monitor",       "ping_monitor"),
+            ("🎭   MAC Anonymize",      "anonymize"),
+            ("🚦   Speed Control",      "throttle"),
+        ]:
+            _secondary_button(
+                qa, text=label,
+                command=lambda k=key: self._app._show_frame(k),
+                anchor="w",
+            ).pack(fill="x", padx=14, pady=3)
+
+        # Destructive action
+        _danger_button(
+            qa, text="⚡   ARP Attack",
+            command=lambda: self._app._show_frame("attack"),
+            height=38,
+        ).pack(fill="x", padx=14, pady=(8, 12))
+
+        # ── Scan history block ────────────────────────────────────────
+        ctk.CTkFrame(qa, height=1, fg_color=_CLR_BORDER).pack(
+            fill="x", padx=14, pady=(2, 10))
+        ctk.CTkLabel(
+            qa, text="Scan History",
+            font=_FONT_HEAD, text_color=_CLR_TEXT,
+        ).pack(padx=20, pady=(0, 6), anchor="w")
         self._history_body = ctk.CTkFrame(qa, fg_color="transparent")
-        self._history_body.pack(fill="x", padx=12, pady=(0, 12))
-
-    @staticmethod
-    def _make_card(parent: ctk.CTkFrame, title: str,
-                   value: str, col: int) -> ctk.CTkLabel:
-        card = ctk.CTkFrame(parent, fg_color=_CLR_SIDEBAR, corner_radius=12)
-        card.grid(row=0, column=col, sticky="nsew", padx=5, pady=4)
-        card.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(card, text=title, font=_FONT_SMALL,
-                     text_color=_CLR_MUTED).pack(padx=14, pady=(12, 2), anchor="w")
-        val_label = ctk.CTkLabel(card, text=value,
-                                 font=(_SF, 20, "bold"),
-                                 text_color=_CLR_SUCCESS)
-        val_label.pack(padx=14, pady=(0, 12), anchor="w")
-        return val_label
+        self._history_body.pack(fill="x", padx=14, pady=(0, 14))
 
     # ── Refresh ───────────────────────────────────────────────────────
 
@@ -2978,6 +3374,16 @@ class NetworkMapFrame(ctk.CTkFrame):
         self._canvas.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 18))
         self._canvas.bind("<Configure>", lambda _e: self.redraw())
 
+    def _on_show(self) -> None:
+        """Refresh the topology whenever the tab is raised.
+
+        The canvas only re-renders on resize events; without this hook the
+        map stays blank if hosts were scanned in another tab and then the
+        user navigates here without resizing the window.
+        """
+        # Defer to next event loop tick so widget geometry is settled.
+        self.after(20, self.redraw)
+
     def redraw(self) -> None:
         """Redraw the network topology on the canvas.
 
@@ -3004,14 +3410,16 @@ class NetworkMapFrame(ctk.CTkFrame):
         # ── Separate gateway entry from peripheral nodes ──────────────
         # The gateway was discovered by ARP like every other host; we pull
         # it out so it only appears in the centre, not also in the ring.
+        # NOTE: don't use ``h`` as the loop variable — it shadows the canvas
+        # height captured above and breaks ``min(w, h)`` below.
         gw_host: Optional[dict] = None
         ring_hosts: list[dict]  = []
-        for h in all_hosts:
-            ip = h.get("ip", "")
+        for host in all_hosts:
+            ip = host.get("ip", "")
             if ip == gw_ip:
-                gw_host = h          # gateway info (vendor / hostname)
+                gw_host = host       # gateway info (vendor / hostname)
             elif ip and ip != own_ip:
-                ring_hosts.append(h) # regular client device
+                ring_hosts.append(host)  # regular client device
 
         n = len(ring_hosts)
 

@@ -242,10 +242,19 @@ class TestFormatHost:
 
 class TestThrottler:
     def setup_method(self):
+        from wifi_killer.modules import throttler as _throttler_mod
         from wifi_killer.modules.throttler import BandwidthThrottler, kbps_to_label, mbps_to_kbps
         self.Throttler = BandwidthThrottler
         self.kbps_to_label = kbps_to_label
         self.mbps_to_kbps = mbps_to_kbps
+        # Force-enable the Linux-only code path so pure-logic tests can exercise
+        # class allocation / rate clamping on macOS and Windows CI runners.
+        self._throttler_mod = _throttler_mod
+        self._orig_is_linux = _throttler_mod._IS_LINUX
+        _throttler_mod._IS_LINUX = True
+
+    def teardown_method(self):
+        self._throttler_mod._IS_LINUX = self._orig_is_linux
 
     def test_initial_state(self):
         t = self.Throttler("eth0")
@@ -1436,15 +1445,27 @@ class TestDefaultIface:
         assert isinstance(result, str)
         assert len(result) > 0
 
-    def test_fallback_is_eth0(self):
+    def test_fallback_is_platform_default(self):
+        """Final fallback should be a sensible per-platform interface name."""
+        import sys
         from wifi_killer.utils import network
-        orig = network.list_interfaces
+        orig_list = network.list_interfaces
         network.list_interfaces = lambda: []
+        # Also bypass Scapy's iface guess so we deterministically hit the
+        # hard-coded platform fallback at the bottom of _default_iface.
+        orig_scapy_available = network._SCAPY_AVAILABLE
+        network._SCAPY_AVAILABLE = False
         try:
             result = network._default_iface()
-            assert result == "eth0"
+            if sys.platform == "darwin":
+                assert result == "en0"
+            elif sys.platform.startswith("win"):
+                assert result == "Ethernet"
+            else:
+                assert result == "eth0"
         finally:
-            network.list_interfaces = orig
+            network.list_interfaces = orig_list
+            network._SCAPY_AVAILABLE = orig_scapy_available
 
 
 # ------------------------------------------------------------------ #

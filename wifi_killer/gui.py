@@ -545,6 +545,56 @@ class WifiKillerApp(ctk.CTk):
         if nmap:
             nmap.request_topology_refresh()
 
+    def mark_attack_changed(self) -> None:
+        """Notify the network map that attack state changed (start / stop)."""
+        nmap: NetworkMapFrame = self._frames.get("network_map")  # type: ignore
+        if nmap:
+            nmap.request_topology_refresh()
+
+    def get_attack_info(self) -> Optional[dict]:
+        """Return a snapshot of the active ARP attack, or ``None`` if idle.
+
+        Returned dict::
+
+            {
+                "active":       True,
+                "method":       "A" | "B" | "C",
+                "gateway":      "10.0.0.1",
+                "attacked_ips": {"10.0.0.55", "10.0.0.72"},
+            }
+        """
+        af = self._frames.get("attack")
+        if not af or not getattr(af, "_running", False):
+            return None
+        obj = getattr(af, "_attack_obj", None)
+        if obj is None:
+            return None
+        # Discover the per-target IPs whether it's a single ArpAttack or a
+        # MultiTargetAttack (whose ``attacks`` is the actual list).
+        attacked: set[str] = set()
+        method = ""
+        gateway = ""
+        single_attacks = getattr(obj, "attacks", None)
+        if single_attacks is not None:
+            for sub in single_attacks:
+                if getattr(sub, "target_ip", ""):
+                    attacked.add(sub.target_ip)
+                method = method or getattr(sub, "method", "")
+                gateway = gateway or getattr(sub, "gateway_ip", "")
+        else:
+            if getattr(obj, "target_ip", ""):
+                attacked.add(obj.target_ip)
+            method = getattr(obj, "method", "")
+            gateway = getattr(obj, "gateway_ip", "")
+        if not attacked:
+            return None
+        return {
+            "active": True,
+            "method": method,
+            "gateway": gateway,
+            "attacked_ips": attacked,
+        }
+
     def record_scan(self, host_count: int) -> None:
         """Record a completed scan in the history (kept to last 5)."""
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -2560,6 +2610,9 @@ class AttackFrame(ctk.CTkFrame):
         # Surface targets that couldn't be resolved (offline / blocked ARP).
         for ip, reason in failed:
             self._app.log(f"  · Skipped {ip}: {reason}", "warn")
+        # Tell the network map to repaint with attack styling now that
+        # ``app.get_attack_info()`` will return a live snapshot.
+        self._app.mark_attack_changed()
 
     def _stop_attack(self) -> None:
         if not self._running:
@@ -2575,6 +2628,8 @@ class AttackFrame(ctk.CTkFrame):
             self.after_cancel(self._timer_id)
             self._timer_id = None
         self._app.log("Attack stopped, restoring ARP caches.", "ok")
+        # Clear attack styling from the network map.
+        self._app.mark_attack_changed()
 
     def _start_counter(self) -> None:
         self._counter_start = time.time()
@@ -3949,6 +4004,9 @@ class NetworkMapFrame(ctk.CTkFrame):
             "self_node": self_node,
             "clients": clients,
             "subnet": subnet,
+            # Snapshot of any active ARP attack so the renderer can mark
+            # the affected nodes/spokes with danger styling.
+            "attack": self._app.get_attack_info(),
         }
 
     def _cached_hostname(self, ip: str) -> str:
@@ -4014,6 +4072,10 @@ class NetworkMapFrame(ctk.CTkFrame):
         self_node = topo["self_node"]
         clients   = topo["clients"]
         subnet    = topo["subnet"]
+        attack    = topo.get("attack") or None
+        attacked_ips: set[str] = (
+            set(attack.get("attacked_ips", set())) if attack else set()
+        )
         cx, cy = w // 2, h // 2
 
         # ── Empty state ───────────────────────────────────────────────
@@ -4039,10 +4101,20 @@ class NetworkMapFrame(ctk.CTkFrame):
         bits.append(f"{online_count} online")
         if offline_count:
             bits.append(f"{offline_count} offline")
-        self._lbl_count.configure(text="  ·  ".join(bits))
+        if attack:
+            method = attack.get("method") or "?"
+            bits.append(f"⚡ ATTACK {method} · {len(attacked_ips)} target(s)")
+        self._lbl_count.configure(
+            text="  ·  ".join(bits),
+            text_color=_CLR_DANGER if attack else _CLR_MUTED,
+        )
+
+        # ── Attack banner across the top of the canvas ────────────────
+        if attack:
+            self._draw_attack_banner(canvas, w, attack)
 
         # ── Legend (top-right corner) ─────────────────────────────────
-        self._draw_legend(canvas, w)
+        self._draw_legend(canvas, w, has_attack=bool(attack))
 
         # ── Geometry ──────────────────────────────────────────────────
         n = len(clients)
@@ -4057,31 +4129,46 @@ class NetworkMapFrame(ctk.CTkFrame):
                 hx = cx + radius * math.cos(angle)
                 hy = cy + radius * math.sin(angle)
                 line_dash: Optional[tuple] = None
+                line_width = 2
                 if slot == 0 and self_node:
-                    # Solid spoke for "this device" (no dash arg → solid).
-                    line_color = _CLR_ACCENT2
+                    # Solid spoke for "this device" — turn red if attacking.
+                    line_color = _CLR_DANGER if attack else _CLR_ACCENT2
+                    if attack:
+                        line_width = 3
                 else:
                     idx = slot - (1 if self_node else 0)
                     if idx < 0 or idx >= n:
                         continue
-                    online = clients[idx].get("online", True)
-                    line_color = _CLR_PANEL if online else "#2a2a3a"
-                    line_dash  = (4, 4) if online else (2, 6)
-                kwargs = dict(fill=line_color, width=2)
+                    client = clients[idx]
+                    online = client.get("online", True)
+                    if client.get("ip") in attacked_ips:
+                        line_color = _CLR_DANGER
+                        line_dash  = (8, 4)
+                        line_width = 3
+                    else:
+                        line_color = _CLR_PANEL if online else "#2a2a3a"
+                        line_dash  = (4, 4) if online else (2, 6)
+                kwargs = dict(fill=line_color, width=line_width)
                 if line_dash is not None:
                     kwargs["dash"] = line_dash
                 canvas.create_line(cx, cy, hx, hy, **kwargs)
 
         # ── Gateway node (centre) ─────────────────────────────────────
         if gateway:
-            self._draw_gateway(canvas, cx, cy, gateway)
+            # In method A (MITM) and C (gateway-cut) the gateway's ARP
+            # cache is also being poisoned — flag it on the centre node.
+            gw_is_poisoned = (
+                attack is not None
+                and attack.get("method") in ("A", "C")
+            )
+            self._draw_gateway(canvas, cx, cy, gateway, poisoned=gw_is_poisoned)
 
         # ── Self node (slot 0) ────────────────────────────────────────
         if self_node and slot_count > 0:
             angle = -math.pi / 2  # straight up
             sx = cx + radius * math.cos(angle)
             sy = cy + radius * math.sin(angle)
-            self._draw_self(canvas, sx, sy, self_node)
+            self._draw_self(canvas, sx, sy, self_node, attacking=bool(attack))
 
         # ── Client nodes (rest of the ring) ───────────────────────────
         for i, host in enumerate(clients):
@@ -4089,24 +4176,59 @@ class NetworkMapFrame(ctk.CTkFrame):
             angle = 2 * math.pi * slot / slot_count - math.pi / 2
             hx = cx + radius * math.cos(angle)
             hy = cy + radius * math.sin(angle)
-            self._draw_client(canvas, hx, hy, host)
+            is_attacked = host.get("ip") in attacked_ips
+            self._draw_client(canvas, hx, hy, host, attacked=is_attacked)
 
     # ------------------------------------------------------------------ #
     # Per-node draw helpers                                                #
     # ------------------------------------------------------------------ #
 
-    def _draw_legend(self, canvas: tk.Canvas, w: int) -> None:
-        lx, ly = w - 156, 14
+    def _draw_attack_banner(
+        self, canvas: tk.Canvas, w: int, attack: dict,
+    ) -> None:
+        """Bright red banner across the top of the canvas while attacking."""
+        method = attack.get("method") or "?"
+        n = len(attack.get("attacked_ips") or set())
+        method_label = {
+            "A": "FULL MITM (bi-directional)",
+            "B": "CLIENT CUT-OFF",
+            "C": "GATEWAY CUT-OFF",
+        }.get(method, method)
         canvas.create_rectangle(
-            lx - 8, ly - 4, w - 4, ly + 82,
-            fill=_CLR_PANEL, outline=_CLR_BORDER, width=1,
+            12, 12, w - 12, 44,
+            fill=_shade(_CLR_DANGER, 0.3),
+            outline=_CLR_DANGER, width=1,
         )
+        canvas.create_text(
+            24, 28, anchor="w",
+            text="⚡  ARP ATTACK ACTIVE",
+            fill=_CLR_DANGER, font=(_SF, 11, "bold"),
+        )
+        canvas.create_text(
+            w // 2, 28,
+            text=f"Method {method} · {method_label} · {n} target(s)",
+            fill="#ffd6dc", font=(_SF, 10, "bold"),
+        )
+
+    def _draw_legend(
+        self, canvas: tk.Canvas, w: int, has_attack: bool = False,
+    ) -> None:
+        # Push legend down when the attack banner is visible.
+        ly = 56 if has_attack else 14
+        lx = w - 168
         rows = [
             (_CLR_ACCENT,  "Gateway / router"),
             (_CLR_ACCENT2, "This device"),
             ("#5bc0de",    "Client (online)"),
             ("#3a3a4a",    "Client (offline)"),
         ]
+        if has_attack:
+            rows.append((_CLR_DANGER, "Under attack"))
+        height = 6 + len(rows) * 18 + 4
+        canvas.create_rectangle(
+            lx - 10, ly - 4, w - 4, ly + height,
+            fill=_CLR_PANEL, outline=_CLR_BORDER, width=1,
+        )
         for i, (color, label) in enumerate(rows):
             row_y = ly + 6 + i * 18
             canvas.create_oval(lx, row_y, lx + 12, row_y + 12,
@@ -4116,12 +4238,14 @@ class NetworkMapFrame(ctk.CTkFrame):
 
     def _draw_gateway(
         self, canvas: tk.Canvas, cx: int, cy: int, gw: dict,
+        poisoned: bool = False,
     ) -> None:
         gr = self._GW_R
-        # Outer halo
+        halo_color = _CLR_DANGER if poisoned else _CLR_ACCENT
+        # Outer halo — wider + red when the gateway's ARP cache is being poisoned.
         canvas.create_oval(
-            cx - gr - 6, cy - gr - 6, cx + gr + 6, cy + gr + 6,
-            fill="", outline=_CLR_ACCENT, width=1,
+            cx - gr - 8, cy - gr - 8, cx + gr + 8, cy + gr + 8,
+            fill="", outline=halo_color, width=2 if poisoned else 1,
         )
         # Filled gateway node
         canvas.create_oval(
@@ -4133,10 +4257,13 @@ class NetworkMapFrame(ctk.CTkFrame):
             cx, cy - 2, text=gw.get("icon") or "📶",
             font=(_SF, 18),
         )
-        # "GATEWAY" caption above the IP
+        # Caption above the IP
+        caption = "GATEWAY ⚡ SPOOFED" if poisoned else "GATEWAY"
         canvas.create_text(
             cx, cy - gr - 30,
-            text="GATEWAY", fill=_CLR_ACCENT, font=(_SF, 8, "bold"),
+            text=caption,
+            fill=_CLR_DANGER if poisoned else _CLR_ACCENT,
+            font=(_SF, 8, "bold"),
         )
         canvas.create_text(
             cx, cy - gr - 16,
@@ -4161,21 +4288,34 @@ class NetworkMapFrame(ctk.CTkFrame):
 
     def _draw_self(
         self, canvas: tk.Canvas, sx: float, sy: float, node: dict,
+        attacking: bool = False,
     ) -> None:
         r = self._NODE_R
-        canvas.create_oval(
-            sx - r - 4, sy - r - 4, sx + r + 4, sy + r + 4,
-            fill="", outline=_CLR_ACCENT2, width=1,
-        )
+        # When attacking, our own node gets a red ring + filled red core
+        # so it's obvious *this machine* is the source of the spoofing.
+        if attacking:
+            canvas.create_oval(
+                sx - r - 6, sy - r - 6, sx + r + 6, sy + r + 6,
+                fill="", outline=_CLR_DANGER, width=2,
+            )
+            inner_fill = _CLR_DANGER
+        else:
+            canvas.create_oval(
+                sx - r - 4, sy - r - 4, sx + r + 4, sy + r + 4,
+                fill="", outline=_CLR_ACCENT2, width=1,
+            )
+            inner_fill = _CLR_ACCENT2
         canvas.create_oval(
             sx - r, sy - r, sx + r, sy + r,
-            fill=_CLR_ACCENT2, outline="#ffffff", width=2,
+            fill=inner_fill, outline="#ffffff", width=2,
         )
         canvas.create_text(sx, sy, text=node.get("icon") or "💻",
                            font=(_SF, 14))
+        caption = "ATTACKER ⚡" if attacking else "THIS DEVICE"
+        caption_color = _CLR_DANGER if attacking else _CLR_ACCENT2
         canvas.create_text(
             sx, sy - r - 14,
-            text="THIS DEVICE", fill=_CLR_ACCENT2, font=(_SF, 8, "bold"),
+            text=caption, fill=caption_color, font=(_SF, 8, "bold"),
         )
         canvas.create_text(
             sx, sy + r + 13,
@@ -4190,13 +4330,17 @@ class NetworkMapFrame(ctk.CTkFrame):
 
     def _draw_client(
         self, canvas: tk.Canvas, hx: float, hy: float, host: dict,
+        attacked: bool = False,
     ) -> None:
         r = self._NODE_R
         htype  = (host.get("type") or "").lower()
         online = host.get("online", True)
         icon   = host.get("icon") or ""
 
-        if not online:
+        if attacked:
+            # Override the type-based palette with a danger fill + red halo.
+            fill, outline = _CLR_DANGER, "#ffffff"
+        elif not online:
             fill, outline = "#2a2a44", "#444466"
         elif "mobile" in htype or "phone" in htype or "ipad" in htype:
             fill, outline = "#5bc0de", _CLR_TEXT
@@ -4209,20 +4353,36 @@ class NetworkMapFrame(ctk.CTkFrame):
         else:
             fill, outline = _CLR_ACCENT2, _CLR_TEXT
 
+        # Halo ring for attacked clients.
+        if attacked:
+            canvas.create_oval(
+                hx - r - 5, hy - r - 5, hx + r + 5, hy + r + 5,
+                fill="", outline=_CLR_DANGER, width=2,
+            )
+
         canvas.create_oval(
             hx - r, hy - r, hx + r, hy + r,
             fill=fill, outline=outline, width=1,
         )
         if icon:
             canvas.create_text(hx, hy, text=icon, font=(_SF, 12))
-        if not online:
+        if not online and not attacked:
             canvas.create_text(
                 hx, hy + 1, text="off",
                 fill="#888899", font=(_SF, 7, "bold"),
             )
 
+        # Caption above attacked nodes so the user sees status without hover.
+        if attacked:
+            canvas.create_text(
+                hx, hy - r - 12,
+                text="⚡ UNDER ATTACK",
+                fill=_CLR_DANGER, font=(_SF, 8, "bold"),
+            )
+
         # Labels below the node
-        ip_color = _CLR_TEXT if online else "#555577"
+        ip_color = (_CLR_DANGER if attacked
+                    else _CLR_TEXT if online else "#555577")
         canvas.create_text(
             hx, hy + r + 13,
             text=host.get("ip", "?"),
@@ -4237,7 +4397,7 @@ class NetworkMapFrame(ctk.CTkFrame):
             canvas.create_text(
                 hx, hy + r + 26,
                 text=sub[:20],
-                fill="#555577" if not online else _CLR_MUTED,
+                fill="#555577" if not online and not attacked else _CLR_MUTED,
                 font=(_SF, 7),
             )
 

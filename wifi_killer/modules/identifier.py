@@ -483,6 +483,8 @@ DEVICE_ICONS: dict[str, str] = {
     "Apple Mac":               "💻",
     "Apple iPhone / iPad":     "📱",
     "Apple TV":                "📺",
+    "Apple HomePod":           "🔊",
+    "Apple Device":            "🍎",
     "Apple Watch":             "⌚",
     "Windows PC":              "🖥️",
     "PC / Laptop":             "💻",
@@ -490,6 +492,7 @@ DEVICE_ICONS: dict[str, str] = {
     "Linux/Windows Server":    "🖧",
     "Network Printer":         "🖨️",
     "Smart TV":                "📺",
+    "Plex Media Server":       "🎬",
     "Game Console":            "🎮",
     "Smart Home Device":       "🏠",
     "Amazon Echo":             "🔊",
@@ -673,22 +676,40 @@ def os_fingerprint_from_ttl(ttl: int) -> str:
 # Public API                                                           #
 # ------------------------------------------------------------------ #
 
+def _is_locally_administered_mac(mac: str) -> bool:
+    """True if *mac* has the locally-administered bit set.
+
+    Modern macOS / iOS / Android randomise their WiFi MAC by default,
+    which sets bit 1 of the first octet. The OUI database has no entry
+    for such MACs, so we use this as a signal to invest in active probing.
+    """
+    try:
+        first = int(mac.split(":")[0].split("-")[0], 16)
+        return bool(first & 0x02)
+    except (ValueError, IndexError):
+        return False
+
+
 def identify_host(
     ip: str,
     mac: str,
     open_ports: Optional[list[int]] = None,
     gateway_ip: str = "",
     ttl: Optional[int] = None,
+    active_probe: bool = True,
 ) -> dict:
     """Return a full identification dict for a host.
 
     Args:
-        ip:          IPv4 address string.
-        mac:         MAC address string.
-        open_ports:  List of open TCP ports (empty list if unknown).
-        gateway_ip:  Default gateway IP – used to flag it as a router.
-        ttl:         Observed IP TTL value; when provided an ``os_hint``
-                     key is included in the returned dict.
+        ip:           IPv4 address string.
+        mac:          MAC address string.
+        open_ports:   List of open TCP ports (empty list if unknown).
+        gateway_ip:   Default gateway IP – used to flag it as a router.
+        ttl:          Observed IP TTL value; when provided an ``os_hint``
+                      key is included in the returned dict.
+        active_probe: When True (default), run mDNS + tell-tale port
+                      probes for hosts whose MAC vendor is Unknown or
+                      randomised. Disable for very large scans.
 
     Returns:
         Dict with keys: ip, mac, vendor, hostname, type, open_ports,
@@ -698,8 +719,45 @@ def identify_host(
         open_ports = []
     vendor      = oui_db.lookup(mac)
     hostname    = resolve_hostname(ip)
-    device_type = guess_device_type(ip, mac, vendor, hostname, open_ports, gateway_ip)
-    icon        = get_device_icon(device_type)
+    device_type = guess_device_type(
+        ip, mac, vendor, hostname, open_ports, gateway_ip,
+    )
+
+    # ── Active fingerprint fallback ────────────────────────────────────
+    # OUI lookup loses on MAC-randomised devices (modern macOS / iOS /
+    # Android), and on locally-administered MACs in general. When the
+    # MAC vendor is Unknown — or the host classifies as a generic /
+    # Unknown type — we send a short mDNS query + tell-tale port probe
+    # to gather MAC-independent evidence about what this device is.
+    if active_probe and ip and ip != gateway_ip:
+        needs_active = (
+            vendor in ("", "Unknown")
+            or _is_locally_administered_mac(mac)
+            or device_type.startswith("Unknown")
+            or device_type == "Network Device / Server"
+        )
+        if needs_active:
+            try:
+                from wifi_killer.modules.fingerprint import (
+                    probe_mdns_services,
+                    probe_telltale_ports,
+                    classify_from_fingerprint,
+                )
+                services = probe_mdns_services(ip, timeout=0.7)
+                tell_ports = probe_telltale_ports(ip, timeout=0.35)
+                verdict = classify_from_fingerprint(services, tell_ports)
+                if verdict:
+                    new_type, _icon = verdict
+                    device_type = new_type
+                    # Promote tell-tale ports into the open-ports list so
+                    # downstream UI / exports show the same data.
+                    for p in tell_ports:
+                        if p not in open_ports:
+                            open_ports.append(p)
+            except Exception:
+                pass
+
+    icon = get_device_icon(device_type)
     result: dict = {
         "ip":         ip,
         "mac":        mac,

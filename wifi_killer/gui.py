@@ -127,6 +127,14 @@ def _validate_mac(mac: str) -> bool:
     return bool(re.fullmatch(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", mac))
 
 
+def _ip_sort_key(ip: str) -> tuple[int, int, int, int]:
+    """Numeric sort key for IPv4 strings so 10.0.0.9 < 10.0.0.10."""
+    try:
+        return tuple(int(p) for p in ip.split("."))  # type: ignore[return-value]
+    except (ValueError, AttributeError):
+        return (0, 0, 0, 0)
+
+
 # ===========================================================================
 # Tooltip helper
 # ===========================================================================
@@ -1995,18 +2003,47 @@ class AttackFrame(ctk.CTkFrame):
         self._app = app
         self._attack_obj = None
         self._running = False
-        self._targets: list[dict] = []
+        # Selection model: IP → BooleanVar driving the checkbox.
+        self._selection: dict[str, tk.BooleanVar] = {}
+        # Row widgets keyed by IP so we can recolour / hide on filter.
+        self._rows: dict[str, ctk.CTkFrame] = {}
+        self._filter_var = tk.StringVar()
         self._build()
 
+    # ------------------------------------------------------------------ #
+    # Target selection                                                     #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def _selected_targets(self) -> list[dict]:
+        """Return the currently-checked hosts as a list of host dicts."""
+        out: list[dict] = []
+        registry = self._app._host_registry
+        for ip, var in self._selection.items():
+            if var.get() and ip in registry:
+                out.append(registry[ip])
+        return out
+
     def set_targets(self, targets: list[dict]) -> None:
-        self._targets = targets
-        names = ", ".join(t["ip"] for t in targets[:5])
-        if len(targets) > 5:
-            names += f" + {len(targets)-5} more"
-        self._target_label.configure(text=names or "None selected")
+        """Programmatic API used from the Scan tab's 'Attack Selected'.
+
+        Ensures the target picker reflects the passed-in hosts (others
+        get deselected so the user sees exactly what's about to run).
+        """
+        wanted = {t.get("ip", "") for t in targets if t.get("ip")}
+        # Make sure every wanted host is in the registry / picker.
+        self._refresh_target_list()
+        for ip, var in self._selection.items():
+            var.set(ip in wanted)
+        self._update_target_summary()
+
+    def _on_show(self) -> None:
+        """Re-sync the target list each time the tab is opened."""
+        self._refresh_target_list()
 
     def _build(self) -> None:
-        self.grid_rowconfigure(4, weight=1)
+        # Row 0 header, 1 banner, 2 config card, 3 target picker (grows), 4 status
+        self.grid_rowconfigure(3, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
         # ── Page header ───────────────────────────────────────────────
@@ -2016,7 +2053,7 @@ class AttackFrame(ctk.CTkFrame):
             title="ARP Attack",
             subtitle="ARP-spoofing attacks — authorised network testing only",
         )
-        header.grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 14))
+        header.grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 12))
 
         # ── Hazard banner ─────────────────────────────────────────────
         banner = ctk.CTkFrame(
@@ -2026,7 +2063,7 @@ class AttackFrame(ctk.CTkFrame):
             border_width=1,
             border_color=_CLR_DANGER,
         )
-        banner.grid(row=1, column=0, sticky="ew", padx=28, pady=(0, 16))
+        banner.grid(row=1, column=0, sticky="ew", padx=28, pady=(0, 14))
         ctk.CTkLabel(
             banner,
             text="⚠   Destructive: this will impersonate the gateway on your LAN. "
@@ -2036,35 +2073,20 @@ class AttackFrame(ctk.CTkFrame):
             anchor="w",
         ).pack(fill="x", padx=14, pady=10)
 
-        # ── Config card ───────────────────────────────────────────────
+        # ── Config card (method + gateway + launch buttons) ───────────
         panel = ctk.CTkFrame(
             self, fg_color=_CLR_PANEL, corner_radius=14,
             border_width=1, border_color=_CLR_BORDER,
         )
-        panel.grid(row=2, column=0, padx=28, sticky="ew")
+        panel.grid(row=2, column=0, padx=28, sticky="ew", pady=(0, 12))
         panel.grid_columnconfigure(1, weight=1)
-
-        # Targets row
-        ctk.CTkLabel(
-            panel, text="TARGETS",
-            font=(_SF, 9, "bold"), text_color=_CLR_MUTED,
-        ).grid(row=0, column=0, padx=(18, 12), pady=(18, 10), sticky="w")
-        self._target_label = ctk.CTkLabel(
-            panel, text="None – go to Scan tab and select hosts",
-            font=_FONT_LABEL, text_color=_CLR_WARNING, anchor="w",
-        )
-        self._target_label.grid(row=0, column=1, padx=8, pady=(18, 10), sticky="w")
-
-        _secondary_button(
-            panel, text="Use All Scanned Hosts",
-            command=self._use_all_hosts, width=190, height=34,
-        ).grid(row=0, column=2, padx=18, pady=(18, 10))
+        panel.grid_columnconfigure(3, weight=0)
 
         # Method
         ctk.CTkLabel(
             panel, text="METHOD",
             font=(_SF, 9, "bold"), text_color=_CLR_MUTED,
-        ).grid(row=1, column=0, padx=(18, 12), pady=10, sticky="w")
+        ).grid(row=0, column=0, padx=(18, 12), pady=(16, 10), sticky="w")
         self._method = ctk.CTkComboBox(
             panel, width=320, height=36, font=_FONT_LABEL,
             values=[
@@ -2073,54 +2095,135 @@ class AttackFrame(ctk.CTkFrame):
                 "C – Cut Gateway Only",
             ],
             fg_color=_CLR_SIDEBAR,
-            border_color=_CLR_BORDER,
-            border_width=1,
-            button_color=_CLR_SIDEBAR,
-            button_hover_color=_CLR_HOVER,
-            dropdown_fg_color=_CLR_PANEL,
-            dropdown_hover_color=_CLR_HOVER,
+            border_color=_CLR_BORDER, border_width=1,
+            button_color=_CLR_SIDEBAR, button_hover_color=_CLR_HOVER,
+            dropdown_fg_color=_CLR_PANEL, dropdown_hover_color=_CLR_HOVER,
         )
         self._method.set("A – Full MITM (bi-directional)")
-        self._method.grid(row=1, column=1, padx=8, pady=10, sticky="w")
+        self._method.grid(row=0, column=1, padx=8, pady=(16, 10), sticky="w")
 
         # Gateway override
         ctk.CTkLabel(
             panel, text="GATEWAY IP",
             font=(_SF, 9, "bold"), text_color=_CLR_MUTED,
-        ).grid(row=2, column=0, padx=(18, 12), pady=10, sticky="w")
+        ).grid(row=0, column=2, padx=(20, 8), pady=(16, 10), sticky="e")
         self._gw_entry = ctk.CTkEntry(
-            panel, width=200, height=36, font=_FONT_LABEL,
+            panel, width=180, height=36, font=_FONT_LABEL,
             placeholder_text="auto-detected",
             fg_color=_CLR_SIDEBAR,
-            border_color=_CLR_BORDER,
-            border_width=1,
+            border_color=_CLR_BORDER, border_width=1,
         )
-        self._gw_entry.grid(row=2, column=1, padx=8, pady=10, sticky="w")
+        self._gw_entry.grid(row=0, column=3, padx=(0, 18), pady=(16, 10),
+                            sticky="e")
 
-        # Buttons
+        # Buttons row (full width)
         btn_row = ctk.CTkFrame(panel, fg_color="transparent")
-        btn_row.grid(row=3, column=0, columnspan=3,
-                     padx=18, pady=(14, 18), sticky="w")
+        btn_row.grid(row=1, column=0, columnspan=4,
+                     padx=18, pady=(0, 16), sticky="ew")
 
         self._start_btn = _danger_button(
             btn_row, text="⚡   Launch Attack",
-            command=self._start_attack, width=170,
+            command=self._start_attack, width=180,
         )
         self._start_btn.pack(side="left", padx=(0, 12))
 
         self._stop_btn = _secondary_button(
             btn_row, text="⏹   Stop & Restore",
-            command=self._stop_attack, width=170, height=40,
+            command=self._stop_attack, width=180, height=40,
             state="disabled",
         )
         self._stop_btn.pack(side="left")
+
+        # Selection-count badge sits to the right of the launch buttons.
+        self._target_summary = ctk.CTkLabel(
+            btn_row,
+            text="0 of 0 targets selected",
+            font=(_SF, 11, "bold"),
+            text_color=_CLR_MUTED,
+        )
+        self._target_summary.pack(side="right")
+
+        # ── Target picker card ────────────────────────────────────────
+        picker = ctk.CTkFrame(
+            self, fg_color=_CLR_PANEL, corner_radius=14,
+            border_width=1, border_color=_CLR_BORDER,
+        )
+        picker.grid(row=3, column=0, padx=28, pady=(0, 12), sticky="nsew")
+        picker.grid_columnconfigure(0, weight=1)
+        picker.grid_rowconfigure(3, weight=1)
+
+        # Title + count
+        title_row = ctk.CTkFrame(picker, fg_color="transparent")
+        title_row.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 4))
+        title_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            title_row, text="Targets",
+            font=_FONT_HEAD, text_color=_CLR_TEXT, anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        self._picker_count = ctk.CTkLabel(
+            title_row, text="",
+            font=(_SF, 10, "bold"), text_color=_CLR_MUTED, anchor="e",
+        )
+        self._picker_count.grid(row=0, column=1, sticky="e")
+
+        # Filter input + quick-select buttons
+        ctrl_row = ctk.CTkFrame(picker, fg_color="transparent")
+        ctrl_row.grid(row=1, column=0, sticky="ew", padx=14, pady=(8, 6))
+        ctrl_row.grid_columnconfigure(0, weight=1)
+
+        self._filter_entry = ctk.CTkEntry(
+            ctrl_row, textvariable=self._filter_var, height=32,
+            placeholder_text="Filter by IP, hostname, vendor, or type…",
+            font=_FONT_LABEL,
+            fg_color=_CLR_SIDEBAR,
+            border_color=_CLR_BORDER, border_width=1,
+        )
+        self._filter_entry.grid(row=0, column=0, sticky="ew", padx=(4, 8))
+        self._filter_var.trace_add("write", lambda *_: self._apply_filter())
+
+        _ghost_button(
+            ctrl_row, text="✕", width=32, height=32,
+            command=lambda: self._filter_var.set(""),
+            font=_FONT_LABEL,
+        ).grid(row=0, column=1, padx=(0, 8))
+
+        _ghost_button(
+            ctrl_row, text="🔄  Refresh", width=110, height=32,
+            command=self._refresh_target_list, font=_FONT_SMALL,
+        ).grid(row=0, column=2)
+
+        # Quick-select chip row
+        chip_row = ctk.CTkFrame(picker, fg_color="transparent")
+        chip_row.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 8))
+        for label, fn in [
+            ("☑   All",         self._select_all_visible),
+            ("☐   None",        self._select_none),
+            ("🟢   Online",     self._select_online),
+            ("💻   Macs / PCs", self._select_computers),
+            ("📱   Phones",     self._select_phones),
+            ("📺   TVs / Cast", self._select_media),
+            ("🖨   Printers",  self._select_printers),
+            ("❓   Unknown",    self._select_unknown),
+        ]:
+            _ghost_button(
+                chip_row, text=label, command=fn,
+                width=0, height=28, font=_FONT_SMALL,
+            ).pack(side="left", padx=(0, 6))
+
+        # Scrollable list of hosts (rows built in _refresh_target_list)
+        self._target_list = ctk.CTkScrollableFrame(
+            picker, fg_color="transparent", corner_radius=0,
+        )
+        self._target_list.grid(row=3, column=0, sticky="nsew",
+                               padx=10, pady=(0, 12))
+        self._target_list.grid_columnconfigure(0, weight=1)
 
         # ── Status card ───────────────────────────────────────────────
         status_card = ctk.CTkFrame(
             self, fg_color=_CLR_PANEL, corner_radius=14,
             border_width=1, border_color=_CLR_BORDER,
         )
-        status_card.grid(row=3, column=0, padx=28, pady=(18, 0), sticky="ew")
+        status_card.grid(row=4, column=0, padx=28, pady=(0, 22), sticky="ew")
         status_card.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
@@ -2142,14 +2245,210 @@ class AttackFrame(ctk.CTkFrame):
 
         self._timer_id = None
 
-    def _use_all_hosts(self) -> None:
-        self.set_targets(self._app._hosts)
+        # Initial population (after construction is complete)
+        self.after(50, self._refresh_target_list)
+
+    # ------------------------------------------------------------------ #
+    # Target list population & filtering                                   #
+    # ------------------------------------------------------------------ #
+
+    def _refresh_target_list(self) -> None:
+        """Rebuild the host list from the app's host registry.
+
+        Preserves the current selection — checkboxes for hosts that
+        remain in the registry stay ticked; new hosts default to
+        unchecked. Excludes the gateway and the local machine.
+        """
+        # Capture current selection state.
+        prior = {ip: var.get() for ip, var in self._selection.items()}
+
+        # Clear widgets and the row map.
+        for w in self._target_list.winfo_children():
+            w.destroy()
+        self._rows.clear()
+        new_selection: dict[str, tk.BooleanVar] = {}
+
+        gw = (self._app._gateway or self._gw_entry.get() or "").strip()
+        own = self._app._get_own_ip()
+
+        hosts = sorted(
+            (h for h in self._app._hosts
+             if h.get("ip") and h["ip"] != gw and h["ip"] != own),
+            key=lambda h: _ip_sort_key(h.get("ip", "")),
+        )
+
+        if not hosts:
+            ctk.CTkLabel(
+                self._target_list,
+                text="No hosts discovered yet — run a scan first.",
+                font=_FONT_LABEL, text_color=_CLR_MUTED,
+            ).pack(padx=16, pady=20, anchor="w")
+            self._picker_count.configure(text="0 hosts")
+            self._update_target_summary()
+            return
+
+        for idx, host in enumerate(hosts):
+            ip = host["ip"]
+            var = tk.BooleanVar(value=prior.get(ip, False))
+            var.trace_add("write", lambda *_: self._update_target_summary())
+            new_selection[ip] = var
+            self._add_target_row(host, var, idx)
+
+        self._selection = new_selection
+        self._picker_count.configure(text=f"{len(hosts)} hosts")
+        self._update_target_summary()
+        self._apply_filter()
+
+    def _add_target_row(
+        self, host: dict, var: tk.BooleanVar, idx: int,
+    ) -> None:
+        bg = _CLR_ROW_ODD if idx % 2 == 0 else _CLR_ROW_EVEN
+        row = ctk.CTkFrame(self._target_list, fg_color=bg, corner_radius=8)
+        row.pack(fill="x", padx=4, pady=1)
+        row.grid_columnconfigure(2, weight=1)
+
+        # Checkbox
+        ctk.CTkCheckBox(
+            row, text="", variable=var,
+            checkbox_width=18, checkbox_height=18,
+            corner_radius=4,
+            fg_color=_CLR_ACCENT,
+            hover_color=_shade(_CLR_ACCENT, 0.85),
+            border_color=_CLR_BORDER, border_width=1,
+            width=22,
+        ).grid(row=0, column=0, padx=(12, 8), pady=8, sticky="w")
+
+        # Icon + IP + hostname stack
+        icon = host.get("icon", "🔌")
+        ctk.CTkLabel(
+            row, text=icon, font=(_SF, 16),
+        ).grid(row=0, column=1, padx=(0, 8), pady=8, sticky="w")
+
+        text_col = ctk.CTkFrame(row, fg_color="transparent")
+        text_col.grid(row=0, column=2, padx=(0, 8), pady=6, sticky="ew")
+        text_col.grid_columnconfigure(0, weight=1)
+
+        hn = host.get("hostname") or ""
+        primary = hn if hn and hn not in ("Unknown",) else host["ip"]
+        ctk.CTkLabel(
+            text_col, text=primary,
+            font=_FONT_NAME, text_color=_CLR_TEXT, anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+
+        # Secondary line: IP (if hostname shown) + vendor + type
+        bits = []
+        if primary != host["ip"]:
+            bits.append(host["ip"])
+        vendor = host.get("vendor") or ""
+        if vendor and vendor != "Unknown":
+            bits.append(vendor)
+        dtype = host.get("type") or ""
+        if dtype and dtype != "Unknown Device":
+            bits.append(dtype)
+        if bits:
+            ctk.CTkLabel(
+                text_col, text="  ·  ".join(bits),
+                font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
+            ).grid(row=1, column=0, sticky="w")
+
+        # Type pill + online dot
+        ctk.CTkLabel(
+            row, text=host.get("type", "—"),
+            font=_FONT_SMALL, text_color=_CLR_MUTED,
+            anchor="e", width=140,
+        ).grid(row=0, column=3, padx=(0, 8), pady=8, sticky="e")
+
+        online = host.get("online", True)
+        ctk.CTkLabel(
+            row, text="●",
+            font=(_SF, 13),
+            text_color=_CLR_SUCCESS if online else _CLR_MUTED,
+        ).grid(row=0, column=4, padx=(0, 14), pady=8, sticky="e")
+
+        self._rows[host["ip"]] = row
+
+    def _apply_filter(self) -> None:
+        needle = self._filter_var.get().strip().lower()
+        registry = self._app._host_registry
+        for ip, row in self._rows.items():
+            host = registry.get(ip, {"ip": ip})
+            haystack = " ".join(str(host.get(k, "")) for k in
+                                ("ip", "hostname", "vendor", "type",
+                                 "mac", "icon")).lower()
+            visible = (not needle) or (needle in haystack)
+            if visible:
+                row.pack(fill="x", padx=4, pady=1)
+            else:
+                row.pack_forget()
+
+    def _update_target_summary(self) -> None:
+        total = len(self._selection)
+        selected = sum(1 for v in self._selection.values() if v.get())
+        self._target_summary.configure(
+            text=f"{selected} of {total} targets selected",
+            text_color=_CLR_ACCENT if selected else _CLR_MUTED,
+        )
+
+    # ── Quick-select shortcuts ────────────────────────────────────────
+
+    def _matching_visible(self) -> list[str]:
+        """IPs of rows currently visible under the active filter."""
+        return [ip for ip, row in self._rows.items()
+                if row.winfo_manager()]  # 'pack' if visible, '' if hidden
+
+    def _select_all_visible(self) -> None:
+        for ip in self._matching_visible():
+            self._selection[ip].set(True)
+
+    def _select_none(self) -> None:
+        for var in self._selection.values():
+            var.set(False)
+
+    def _select_online(self) -> None:
+        reg = self._app._host_registry
+        for ip, var in self._selection.items():
+            var.set(bool(reg.get(ip, {}).get("online", True)))
+
+    def _select_by_type(self, predicate) -> None:
+        reg = self._app._host_registry
+        for ip, var in self._selection.items():
+            t = (reg.get(ip, {}).get("type") or "").lower()
+            var.set(predicate(t))
+
+    def _select_computers(self) -> None:
+        self._select_by_type(lambda t: any(k in t for k in (
+            "mac", "windows", "pc", "laptop", "linux", "server",
+        )))
+
+    def _select_phones(self) -> None:
+        self._select_by_type(lambda t: any(k in t for k in (
+            "iphone", "ipad", "ipod", "android", "mobile", "phone",
+        )))
+
+    def _select_media(self) -> None:
+        self._select_by_type(lambda t: any(k in t for k in (
+            "tv", "cast", "chromecast", "roku", "console", "plex",
+            "homepod", "sonos", "speaker",
+        )))
+
+    def _select_printers(self) -> None:
+        self._select_by_type(lambda t: "printer" in t)
+
+    def _select_unknown(self) -> None:
+        self._select_by_type(
+            lambda t: t in ("", "unknown device", "unknown iot device")
+        )
 
     def _start_attack(self) -> None:
         if self._running:
             return
-        if not self._targets:
-            messagebox.showwarning("No Targets", "Select targets in the Scan tab first.")
+
+        targets = self._selected_targets
+        if not targets:
+            messagebox.showwarning(
+                "No Targets",
+                "Tick at least one host in the target list before launching.",
+            )
             return
         gw = self._gw_entry.get().strip() or self._app._gateway
         if not gw:
@@ -2163,9 +2462,9 @@ class AttackFrame(ctk.CTkFrame):
             return
 
         method_str = self._method.get()[0]  # 'A', 'B', or 'C'
-        target_ips = ", ".join(t["ip"] for t in self._targets[:5])
-        if len(self._targets) > 5:
-            target_ips += f" + {len(self._targets) - 5} more"
+        target_ips = ", ".join(t["ip"] for t in targets[:5])
+        if len(targets) > 5:
+            target_ips += f" + {len(targets) - 5} more"
 
         # Safety confirmation
         method_desc = {
@@ -2185,33 +2484,82 @@ class AttackFrame(ctk.CTkFrame):
         if not confirmed:
             return
 
+        # ── Prepare & start in a background thread ────────────────────
+        # MAC resolution can take several seconds even in parallel; doing
+        # it on the main thread froze the GUI before. The worker reports
+        # back via after(0, ...) for all UI updates.
+        self._start_btn.configure(state="disabled", text="Preparing…")
+        self._stop_btn.configure(state="disabled")
+        self._status_label.configure(
+            text=f"⏳  Resolving MACs for {len(targets)} target(s)…",
+            text_color=_CLR_WARNING,
+        )
+        self._pkt_label.configure(text="")
+
+        _thread(self._launch_worker, method_str, targets, gw)
+
+    def _launch_worker(self, method_str: str, targets: list[dict], gw: str) -> None:
+        """Background-thread half of _start_attack — does the slow MAC work."""
+        from wifi_killer.modules.attacker import ArpAttack, MultiTargetAttack
         try:
-            from wifi_killer.modules.attacker import ArpAttack, MultiTargetAttack
-
-            if len(self._targets) == 1:
-                self._attack_obj = ArpAttack(
-                    method_str, self._targets[0]["ip"], gw, self._app._iface)
+            if len(targets) == 1:
+                atk = ArpAttack(method_str, targets[0]["ip"], gw, self._app._iface)
+                # Use prepare() so we can resolve in this worker thread.
+                atk.prepare(
+                    target_mac=(targets[0].get("mac") or "").upper() or None,
+                )
+                atk.start()
+                self._attack_obj = atk
+                failed: list[tuple[str, str]] = []
             else:
-                self._attack_obj = MultiTargetAttack(
-                    method_str, self._targets, gw, self._app._iface)
-
-            self._attack_obj.start()
+                multi = MultiTargetAttack(
+                    method_str, targets, gw, self._app._iface,
+                )
+                multi.start()
+                self._attack_obj = multi
+                failed = list(multi.failed_targets)
+            actual_count = (
+                1 if isinstance(self._attack_obj, ArpAttack)
+                else len(self._attack_obj.attacks)
+            )
         except Exception as exc:
-            messagebox.showerror("Attack Error", str(exc))
+            self.after(0, lambda e=exc: self._launch_failed(str(e)))
             return
 
+        self.after(0, lambda: self._launch_succeeded(
+            method_str, actual_count, gw, failed,
+        ))
+
+    def _launch_failed(self, message: str) -> None:
+        """Main-thread handler: worker raised; reset UI and show the error."""
+        self._attack_obj = None
+        self._start_btn.configure(state="normal", text="⚡   Launch Attack")
+        self._stop_btn.configure(state="disabled")
+        self._status_label.configure(text="Idle", text_color=_CLR_MUTED)
+        self._pkt_label.configure(text="")
+        messagebox.showerror("Attack Error", message)
+        self._app.log(f"Attack failed: {message}", "err")
+
+    def _launch_succeeded(
+        self, method_str: str, count: int, gw: str,
+        failed: list[tuple[str, str]],
+    ) -> None:
+        """Main-thread handler: attack is running; flip the UI to live state."""
         self._running = True
-        self._start_btn.configure(state="disabled")
+        self._start_btn.configure(state="disabled", text="⚡   Launch Attack")
         self._stop_btn.configure(state="normal")
         self._status_label.configure(
-            text=f"🔴  ATTACKING  {len(self._targets)} target(s)  |  Method {method_str}",
+            text=f"🔴  ATTACKING  {count} target(s)  |  Method {method_str}",
             text_color=_CLR_DANGER,
         )
         self._start_counter()
         self._app.log(
-            f"Attack started – Method {method_str}  |  {len(self._targets)} target(s)  |  GW {gw}",
+            f"Attack started – Method {method_str}  |  {count} target(s)  |  GW {gw}",
             "warn",
         )
+        # Surface targets that couldn't be resolved (offline / blocked ARP).
+        for ip, reason in failed:
+            self._app.log(f"  · Skipped {ip}: {reason}", "warn")
 
     def _stop_attack(self) -> None:
         if not self._running:
@@ -2219,9 +2567,10 @@ class AttackFrame(ctk.CTkFrame):
         if self._attack_obj:
             _thread(self._attack_obj.stop)
         self._running = False
-        self._start_btn.configure(state="normal")
+        self._start_btn.configure(state="normal", text="⚡   Launch Attack")
         self._stop_btn.configure(state="disabled")
         self._status_label.configure(text="Stopped – ARP tables restoring…", text_color=_CLR_WARNING)
+        self._pkt_label.configure(text="")
         if self._timer_id:
             self.after_cancel(self._timer_id)
             self._timer_id = None

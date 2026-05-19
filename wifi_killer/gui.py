@@ -49,6 +49,7 @@ from wifi_killer.utils.network import (
     list_interfaces,
     ping_once as _ping_once,
 )
+import ipaddress
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -474,18 +475,31 @@ class WifiKillerApp(ctk.CTk):
         self._original_mac = get_interface_mac(iface) or ""
         self._hosts = []
         self._host_registry = {}
+        self._own_ip_cache = ""  # invalidate cached IP since iface changed
         self._topbar.set_own_ip(self._get_own_ip())
         self.log(f"Interface changed to {iface}  |  Gateway: {self._gateway or '(unknown)'}")
 
-    @staticmethod
-    def _get_own_ip() -> str:
-        """Best-effort detection of the local IP used for outbound traffic."""
+    _own_ip_cache: str = ""
+
+    def _get_own_ip(self) -> str:
+        """Cached best-effort detection of the local outbound IP.
+
+        Called from hot paths (dashboard refresh, map redraw); the actual
+        UDP-route lookup is cheap but we still cache it because it was
+        being called dozens of times per second during active scans.
+        """
+        if self._own_ip_cache:
+            return self._own_ip_cache
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.5)
             s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
+            ip = s.getsockname()[0]
+            s.close()
         except Exception:
-            return "?"
+            ip = "?"
+        self._own_ip_cache = ip
+        return ip
 
     # ------------------------------------------------------------------ #
     # Shared log                                                           #
@@ -505,11 +519,23 @@ class WifiKillerApp(ctk.CTk):
         dash: DashboardFrame = self._frames.get("dashboard")  # type: ignore
         if dash:
             self.after(0, dash.refresh)
-        # Also refresh the network map when the host list changes — otherwise
-        # the topology stays empty until the user resizes or refreshes manually.
+        # The network map is intentionally NOT redrawn from this hook —
+        # the dashboard fires it every 5 s on a timer, and the map's
+        # topology resolution does subprocess + ARP-cache reads that
+        # block the main thread under load. The map self-refreshes on
+        # ``_on_show`` (tab change) and ``mark_hosts_changed`` (scan
+        # completion), which is enough.
+
+    def mark_hosts_changed(self) -> None:
+        """Notify dependent frames that the host registry has changed.
+
+        Called once at the end of a scan — not on every host added —
+        so we don't spam the main thread with redraws during an active
+        scan with hundreds of intermediate updates.
+        """
         nmap: NetworkMapFrame = self._frames.get("network_map")  # type: ignore
         if nmap:
-            self.after(0, nmap.redraw)
+            nmap.request_topology_refresh()
 
     def record_scan(self, host_count: int) -> None:
         """Record a completed scan in the history (kept to last 5)."""
@@ -1187,6 +1213,7 @@ class ScanFrame(ctk.CTkFrame):
                 f"Scan complete – {online_count} online, "
                 f"{len(all_known) - online_count} offline (total {len(all_known)} known).", "ok"))
             self.after(0, self._app.refresh_dashboard)
+            self.after(0, self._app.mark_hosts_changed)
 
         except Exception as exc:
             self.after(0, lambda exc=exc: self._app.log(f"Scan error: {exc}", "err"))
@@ -3254,6 +3281,7 @@ class MultiSubnetFrame(ctk.CTkFrame):
             self.after(0, lambda: self._app.log(
                 f"Multi-subnet complete – {len(enriched)} host(s) across {total} subnet(s). "
                 f"Total known: {len(self._app._host_registry)}.", "ok"))
+            self.after(0, self._app.mark_hosts_changed)
 
         except Exception as exc:
             self.after(0, lambda exc=exc: self._app.log(f"Multi-subnet error: {exc}", "err"))
@@ -3336,9 +3364,28 @@ class NetworkMapFrame(ctk.CTkFrame):
     _GW_R   = 36   # gateway node radius (px)
     _MAP_BG = "#0d0d1a"
 
+    # Topology cache TTL — how long a resolved snapshot stays fresh.
+    _TOPO_TTL_SEC = 8.0
+    # Minimum gap between two on_show-triggered refreshes (prevents thrash).
+    _REDRAW_MIN_GAP_SEC = 0.5
+
     def __init__(self, parent, app: WifiKillerApp) -> None:
         super().__init__(parent, fg_color=_CLR_BG, corner_radius=0)
         self._app = app
+        # Async topology cache: heavy resolution runs in a background
+        # thread; the renderer reads this dict and never blocks.
+        self._topo_cache: Optional[dict] = None
+        self._topo_cache_ts: float = 0.0
+        self._topo_lock = threading.Lock()
+        self._topo_resolving = False
+        # If a refresh is requested while a worker is in-flight, the
+        # worker will re-run automatically when it finishes — otherwise
+        # the second request would be a no-op and the stale snapshot
+        # captured by the first worker (e.g. before hosts arrived) wins.
+        self._topo_refresh_pending = False
+        self._last_redraw_ts = 0.0
+        # Cache of hostname lookups (DNS can block) — IP → hostname.
+        self._hostname_cache: dict[str, str] = {}
         self._build()
 
     def _build(self) -> None:
@@ -3364,7 +3411,7 @@ class NetworkMapFrame(ctk.CTkFrame):
         ctk.CTkButton(
             hdr, text="🔄  Refresh", width=110, height=30,
             fg_color=_CLR_PANEL, hover_color=_CLR_ACCENT2,
-            font=_FONT_LABEL, command=self.redraw,
+            font=_FONT_LABEL, command=self.request_topology_refresh,
         ).grid(row=0, column=2, padx=(12, 0), sticky="e")
 
         # ── Canvas ────────────────────────────────────────────────────
@@ -3381,19 +3428,218 @@ class NetworkMapFrame(ctk.CTkFrame):
         map stays blank if hosts were scanned in another tab and then the
         user navigates here without resizing the window.
         """
-        # Defer to next event loop tick so widget geometry is settled.
+        # Always request a topology refresh on tab show — the host list
+        # almost certainly changed since the previous resolution. The
+        # refresh is cheap (a flag flip) and queues a single bg worker.
+        self.request_topology_refresh()
         self.after(20, self.redraw)
 
-    def redraw(self) -> None:
-        """Redraw the network topology on the canvas.
+    def request_topology_refresh(self) -> None:
+        """Mark the topology cache stale and kick off a background refresh.
 
-        The actual gateway router sits in the **centre**; every other
-        discovered host is arranged in a ring around it.  The gateway IP
-        and the local machine's own IP are excluded from the ring so the
-        map truly shows "devices connected to the router", not to this Mac.
-        Online hosts are drawn in colour; offline (seen in a previous scan
-        but absent from the last one) are drawn in grey.
+        Called from the WifiKillerApp scan-completion hook and from
+        the user's "Refresh" button. Safe to call from any thread.
         """
+        with self._topo_lock:
+            self._topo_cache_ts = 0.0
+        self._ensure_topology_fresh()
+
+    # ------------------------------------------------------------------ #
+    # Topology resolution (async — never blocks the Tk main thread)        #
+    # ------------------------------------------------------------------ #
+
+    def _ensure_topology_fresh(self) -> None:
+        """Spawn the resolver in a worker thread if the cache is stale.
+
+        The renderer reads ``self._topo_cache`` directly — this method
+        only ever schedules background work, never blocks. If a worker
+        is already in-flight, the request is queued via
+        ``_topo_refresh_pending`` so the worker re-runs once it finishes.
+        """
+        with self._topo_lock:
+            if self._topo_resolving:
+                self._topo_refresh_pending = True
+                return
+            if (self._topo_cache is not None
+                    and time.time() - self._topo_cache_ts < self._TOPO_TTL_SEC):
+                return
+            self._topo_resolving = True
+            self._topo_refresh_pending = False
+        _thread(self._resolve_topology_worker)
+
+    def _resolve_topology_worker(self) -> None:
+        """Heavy lifting: runs in a background thread, then schedules redraw."""
+        try:
+            result = self._compute_topology()
+        except Exception:
+            result = {"gateway": None, "self_node": None,
+                      "clients": [], "subnet": None}
+        with self._topo_lock:
+            self._topo_cache = result
+            self._topo_resolving = False
+            rerun = self._topo_refresh_pending
+            self._topo_refresh_pending = False
+            # If a refresh was requested mid-run, leave the cache_ts as
+            # stale (0) so the next _ensure_topology_fresh() proceeds.
+            # Otherwise stamp it fresh so subsequent reads use this result.
+            self._topo_cache_ts = 0.0 if rerun else time.time()
+        try:
+            self.after(0, self._render_from_cache)
+        except Exception:
+            return
+        if rerun:
+            self._ensure_topology_fresh()
+
+    def _compute_topology(self) -> dict:
+        """Build the topology model. **Runs in a background thread.**
+
+        Returns a dict with::
+
+            gateway:   {ip, mac, vendor, hostname, online}  or None
+            self_node: {ip, mac, vendor, hostname}          or None
+            clients:   [host_dict, ...]                     (peers on LAN)
+            subnet:    ipaddress.IPv4Network                or None
+        """
+        from wifi_killer.modules.arp_cache import read_arp_cache
+        from wifi_killer.modules.identifier import oui_db
+
+        # 1. Gateway IP — re-detect live, falling back to the cached value.
+        gw_ip = (get_default_gateway() or self._app._gateway or "").strip()
+        if gw_ip and gw_ip != self._app._gateway:
+            self._app._gateway = gw_ip
+
+        own_ip = self._app._get_own_ip()
+        iface = self._app._iface or ""
+
+        # 2. Determine the LAN subnet from the active interface.
+        subnet: Optional[ipaddress.IPv4Network] = None
+        if iface:
+            try:
+                cidr = get_interface_subnet(iface)
+                if cidr:
+                    subnet = ipaddress.IPv4Network(cidr, strict=False)
+            except Exception:
+                subnet = None
+        if subnet is None and gw_ip:
+            try:
+                subnet = ipaddress.IPv4Network(f"{gw_ip}/24", strict=False)
+            except Exception:
+                subnet = None
+
+        def _in_subnet(ip_str: str) -> bool:
+            if subnet is None or not ip_str:
+                return True
+            try:
+                return ipaddress.IPv4Address(ip_str) in subnet
+            except Exception:
+                return False
+
+        # 3. Pull host registry; partition into gateway / self / clients.
+        gateway: Optional[dict] = None
+        self_node: Optional[dict] = None
+        clients: list[dict] = []
+        # Snapshot the registry once — it may be mutated by scan threads.
+        hosts_snapshot = list(self._app._hosts)
+        for host in hosts_snapshot:
+            ip = (host.get("ip") or "").strip()
+            if not ip or not _in_subnet(ip):
+                continue
+            if gw_ip and ip == gw_ip:
+                gateway = dict(host)
+            elif own_ip and ip == own_ip:
+                self_node = dict(host)
+            else:
+                clients.append(host)
+
+        # 4. Enrich gateway from the system ARP cache when needed.
+        if gw_ip:
+            if gateway is None:
+                gateway = {"ip": gw_ip, "online": True}
+            if not gateway.get("mac") or not gateway.get("vendor"):
+                try:
+                    for entry in read_arp_cache():
+                        if entry.get("ip") == gw_ip and entry.get("mac"):
+                            gateway.setdefault("mac", entry["mac"])
+                            break
+                except Exception:
+                    pass
+            mac = gateway.get("mac", "")
+            if mac and not gateway.get("vendor"):
+                try:
+                    gateway["vendor"] = oui_db.lookup(mac)
+                except Exception:
+                    pass
+            # Hostname resolution can block on DNS; use the cache and only
+            # attempt one lookup per IP per session.
+            if not gateway.get("hostname"):
+                gateway["hostname"] = self._cached_hostname(gw_ip)
+            gateway.setdefault("type", "Router")
+            gateway.setdefault("icon", "📶")
+            gateway.setdefault("online", True)
+
+        # 5. Build the self-node entry even when the scan didn't include it.
+        if own_ip and own_ip not in ("", "?"):
+            if self_node is None:
+                self_node = {"ip": own_ip, "online": True}
+            if not self_node.get("mac") and iface:
+                try:
+                    self_node["mac"] = get_interface_mac(iface) or ""
+                except Exception:
+                    pass
+            mac = self_node.get("mac", "")
+            if mac and not self_node.get("vendor"):
+                try:
+                    self_node["vendor"] = oui_db.lookup(mac)
+                except Exception:
+                    pass
+            self_node.setdefault("hostname", "This device")
+            self_node.setdefault("icon", "💻")
+
+        return {
+            "gateway": gateway,
+            "self_node": self_node,
+            "clients": clients,
+            "subnet": subnet,
+        }
+
+    def _cached_hostname(self, ip: str) -> str:
+        """Reverse-DNS lookup with per-frame caching and a hard timeout."""
+        if ip in self._hostname_cache:
+            return self._hostname_cache[ip]
+        result = ""
+        prev = socket.getdefaulttimeout()
+        try:
+            socket.setdefaulttimeout(1.0)
+            host, _, _ = socket.gethostbyaddr(ip)
+            if host and host != ip:
+                result = host
+        except Exception:
+            result = ""
+        finally:
+            socket.setdefaulttimeout(prev)
+        self._hostname_cache[ip] = result
+        return result
+
+    # ------------------------------------------------------------------ #
+    # Drawing                                                              #
+    # ------------------------------------------------------------------ #
+
+    def redraw(self) -> None:
+        """Repaint the network map using the cached topology snapshot.
+
+        This is called by Tk on resize, by the on_show hook, and after
+        the background resolver finishes. It is **never** allowed to
+        do subprocess / DNS work itself — that all happens in the
+        worker thread. Calling redraw on a cold cache draws a "loading"
+        placeholder and triggers the background resolver.
+        """
+        self._last_redraw_ts = time.time()
+        self._render_from_cache()
+        # Always make sure the cache stays warm; the worker no-ops if
+        # the cache is fresh or another worker is already running.
+        self._ensure_topology_fresh()
+
+    def _render_from_cache(self) -> None:
         canvas = self._canvas
         canvas.delete("all")
 
@@ -3402,172 +3648,249 @@ class NetworkMapFrame(ctk.CTkFrame):
         if w < 10 or h < 10:
             return
 
-        all_hosts = self._app._hosts
-        gw_ip     = self._app._gateway or ""
-        own_ip    = self._app._get_own_ip()
-        cx, cy    = w // 2, h // 2
+        with self._topo_lock:
+            topo = self._topo_cache
 
-        # ── Separate gateway entry from peripheral nodes ──────────────
-        # The gateway was discovered by ARP like every other host; we pull
-        # it out so it only appears in the centre, not also in the ring.
-        # NOTE: don't use ``h`` as the loop variable — it shadows the canvas
-        # height captured above and breaks ``min(w, h)`` below.
-        gw_host: Optional[dict] = None
-        ring_hosts: list[dict]  = []
-        for host in all_hosts:
-            ip = host.get("ip", "")
-            if ip == gw_ip:
-                gw_host = host       # gateway info (vendor / hostname)
-            elif ip and ip != own_ip:
-                ring_hosts.append(host)  # regular client device
-
-        n = len(ring_hosts)
-
-        if n == 0 and not gw_ip:
+        if topo is None:
+            cx, cy = w // 2, h // 2
             canvas.create_text(
                 cx, cy,
-                text="No hosts discovered.\nRun a scan first (Scan Network or Multi-Subnet).",
-                fill=_CLR_MUTED, font=(_SF, 13), justify="center",
+                text="Resolving network topology…",
+                fill=_CLR_MUTED, font=(_SF, 13),
             )
-            self._lbl_count.configure(text="No hosts loaded – run a scan first.")
+            self._lbl_count.configure(text="Resolving…")
             return
 
-        online_count  = sum(1 for h in ring_hosts if h.get("online", True))
-        offline_count = n - online_count
-        status_txt = f"{online_count} online"
+        gateway   = topo["gateway"]
+        self_node = topo["self_node"]
+        clients   = topo["clients"]
+        subnet    = topo["subnet"]
+        cx, cy = w // 2, h // 2
+
+        # ── Empty state ───────────────────────────────────────────────
+        if gateway is None and not clients:
+            canvas.create_text(
+                cx, cy,
+                text="No gateway detected and no hosts scanned yet.\n\n"
+                     "1. Pick an interface in the top bar.\n"
+                     "2. Run a scan from the Scan Network tab.",
+                fill=_CLR_MUTED, font=(_SF, 13), justify="center",
+            )
+            self._lbl_count.configure(text="No network detected.")
+            return
+
+        # ── Status banner text ────────────────────────────────────────
+        online_count  = sum(1 for c in clients if c.get("online", True))
+        offline_count = len(clients) - online_count
+        bits: list[str] = []
+        if subnet is not None:
+            bits.append(f"LAN {subnet.with_prefixlen}")
+        if gateway:
+            bits.append(f"GW {gateway['ip']}")
+        bits.append(f"{online_count} online")
         if offline_count:
-            status_txt += f"  ·  {offline_count} offline"
-        if gw_ip:
-            status_txt += f"  ·  GW {gw_ip}"
-        self._lbl_count.configure(text=status_txt)
+            bits.append(f"{offline_count} offline")
+        self._lbl_count.configure(text="  ·  ".join(bits))
 
-        radius = min(w, h) * 0.38
+        # ── Legend (top-right corner) ─────────────────────────────────
+        self._draw_legend(canvas, w)
 
-        # ── Legend (top-right corner) ──────────────────────────────────
-        lx, ly = w - 140, 14
-        canvas.create_rectangle(lx - 6, ly - 4, w - 4, ly + 64,
-                                 fill="#0d0d1a", outline="#333355", width=1)
-        canvas.create_oval(lx, ly + 4,  lx + 12, ly + 16,
-                            fill=_CLR_ACCENT2, outline="")
-        canvas.create_text(lx + 18, ly + 10, text="Online device",
-                            fill=_CLR_MUTED, font=(_SF, 8), anchor="w")
-        canvas.create_oval(lx, ly + 22, lx + 12, ly + 34,
-                            fill="#333355", outline="")
-        canvas.create_text(lx + 18, ly + 28, text="Offline device",
-                            fill=_CLR_MUTED, font=(_SF, 8), anchor="w")
-        canvas.create_oval(lx, ly + 40, lx + 12, ly + 52,
-                            fill=_CLR_ACCENT, outline="")
-        canvas.create_text(lx + 18, ly + 46, text="Gateway (router)",
-                            fill=_CLR_MUTED, font=(_SF, 8), anchor="w")
+        # ── Geometry ──────────────────────────────────────────────────
+        n = len(clients)
+        # Slot 0 is reserved for the self-node so it gets a stable position.
+        slot_count = max(n + (1 if self_node else 0), 1)
+        radius = min(w, h) * 0.36
 
-        # ── Edges (spokes from gateway to each ring node) ─────────────
-        for i in range(n):
-            angle = 2 * math.pi * i / n - math.pi / 2
+        # ── Edges (spokes from gateway) ───────────────────────────────
+        if gateway:
+            for slot in range(slot_count):
+                angle = 2 * math.pi * slot / slot_count - math.pi / 2
+                hx = cx + radius * math.cos(angle)
+                hy = cy + radius * math.sin(angle)
+                line_dash: Optional[tuple] = None
+                if slot == 0 and self_node:
+                    # Solid spoke for "this device" (no dash arg → solid).
+                    line_color = _CLR_ACCENT2
+                else:
+                    idx = slot - (1 if self_node else 0)
+                    if idx < 0 or idx >= n:
+                        continue
+                    online = clients[idx].get("online", True)
+                    line_color = _CLR_PANEL if online else "#2a2a3a"
+                    line_dash  = (4, 4) if online else (2, 6)
+                kwargs = dict(fill=line_color, width=2)
+                if line_dash is not None:
+                    kwargs["dash"] = line_dash
+                canvas.create_line(cx, cy, hx, hy, **kwargs)
+
+        # ── Gateway node (centre) ─────────────────────────────────────
+        if gateway:
+            self._draw_gateway(canvas, cx, cy, gateway)
+
+        # ── Self node (slot 0) ────────────────────────────────────────
+        if self_node and slot_count > 0:
+            angle = -math.pi / 2  # straight up
+            sx = cx + radius * math.cos(angle)
+            sy = cy + radius * math.sin(angle)
+            self._draw_self(canvas, sx, sy, self_node)
+
+        # ── Client nodes (rest of the ring) ───────────────────────────
+        for i, host in enumerate(clients):
+            slot = i + (1 if self_node else 0)
+            angle = 2 * math.pi * slot / slot_count - math.pi / 2
             hx = cx + radius * math.cos(angle)
             hy = cy + radius * math.sin(angle)
-            online = ring_hosts[i].get("online", True)
-            canvas.create_line(
-                cx, cy, hx, hy,
-                fill="#2a2a4a" if not online else _CLR_PANEL,
-                width=2, dash=(6, 4),
-            )
+            self._draw_client(canvas, hx, hy, host)
 
-        # ── Gateway node (centre) ──────────────────────────────────────
+    # ------------------------------------------------------------------ #
+    # Per-node draw helpers                                                #
+    # ------------------------------------------------------------------ #
+
+    def _draw_legend(self, canvas: tk.Canvas, w: int) -> None:
+        lx, ly = w - 156, 14
+        canvas.create_rectangle(
+            lx - 8, ly - 4, w - 4, ly + 82,
+            fill=_CLR_PANEL, outline=_CLR_BORDER, width=1,
+        )
+        rows = [
+            (_CLR_ACCENT,  "Gateway / router"),
+            (_CLR_ACCENT2, "This device"),
+            ("#5bc0de",    "Client (online)"),
+            ("#3a3a4a",    "Client (offline)"),
+        ]
+        for i, (color, label) in enumerate(rows):
+            row_y = ly + 6 + i * 18
+            canvas.create_oval(lx, row_y, lx + 12, row_y + 12,
+                               fill=color, outline="")
+            canvas.create_text(lx + 20, row_y + 6, text=label,
+                               fill=_CLR_MUTED, font=(_SF, 9), anchor="w")
+
+    def _draw_gateway(
+        self, canvas: tk.Canvas, cx: int, cy: int, gw: dict,
+    ) -> None:
         gr = self._GW_R
-        gw_online = gw_host.get("online", True) if gw_host else bool(gw_ip)
-        gw_color  = _CLR_ACCENT if gw_online else "#7a3050"
+        # Outer halo
+        canvas.create_oval(
+            cx - gr - 6, cy - gr - 6, cx + gr + 6, cy + gr + 6,
+            fill="", outline=_CLR_ACCENT, width=1,
+        )
+        # Filled gateway node
         canvas.create_oval(
             cx - gr, cy - gr, cx + gr, cy + gr,
-            fill=gw_color, outline=_CLR_TEXT, width=2,
+            fill=_CLR_ACCENT, outline="#ffffff", width=2,
         )
-        canvas.create_text(cx, cy, text="GW", fill="#ffffff", font=(_SF, 11, "bold"))
-
-        # IP above the gateway node
+        # Router icon
         canvas.create_text(
-            cx, cy - gr - 14,
-            text=gw_ip if gw_ip else "Gateway",
-            fill=_CLR_TEXT, font=(_SF, 9, "bold"),
+            cx, cy - 2, text=gw.get("icon") or "📶",
+            font=(_SF, 18),
         )
-        # Hostname or vendor below the gateway node
-        if gw_host:
-            gw_label = gw_host.get("hostname") or gw_host.get("vendor", "")
-            if gw_label and gw_label != "Unknown":
-                canvas.create_text(
-                    cx, cy + gr + 14,
-                    text=gw_label[:22],
-                    fill=_CLR_MUTED, font=(_SF, 8),
-                )
-
-        # ── Host nodes (ring) ─────────────────────────────────────────
-        r = self._NODE_R
-        for i, host in enumerate(ring_hosts):
-            angle = 2 * math.pi * i / n - math.pi / 2
-            hx = cx + radius * math.cos(angle)
-            hy = cy + radius * math.sin(angle)
-
-            ip     = host.get("ip", "?")
-            vendor = host.get("vendor", "")
-            htype  = host.get("type", "").lower()
-            online = host.get("online", True)
-            icon   = host.get("icon", "")
-
-            # Colour by type (muted when offline)
-            if not online:
-                fill    = "#2a2a44"
-                outline = "#444466"
-            elif "mobile" in htype or "phone" in htype or "ipad" in htype:
-                fill    = "#5bc0de"
-                outline = _CLR_TEXT
-            elif "printer" in htype:
-                fill    = _CLR_WARNING
-                outline = _CLR_TEXT
-            elif "mac" in htype or "apple" in htype:
-                fill    = "#7c3aed"
-                outline = _CLR_TEXT
-            elif "tv" in htype or "console" in htype:
-                fill    = "#0ea5e9"
-                outline = _CLR_TEXT
-            else:
-                fill    = _CLR_ACCENT2
-                outline = _CLR_TEXT
-
-            canvas.create_oval(
-                hx - r, hy - r, hx + r, hy + r,
-                fill=fill, outline=outline, width=1,
-            )
-
-            # Small icon inside the node
-            if icon:
-                canvas.create_text(
-                    hx, hy, text=icon, font=(_SF, 11),
-                )
-
-            # IP below the node
-            label_y  = hy + r + 13
-            ip_color = _CLR_TEXT if online else "#555577"
+        # "GATEWAY" caption above the IP
+        canvas.create_text(
+            cx, cy - gr - 30,
+            text="GATEWAY", fill=_CLR_ACCENT, font=(_SF, 8, "bold"),
+        )
+        canvas.create_text(
+            cx, cy - gr - 16,
+            text=gw.get("ip", ""), fill=_CLR_TEXT, font=(_SF, 11, "bold"),
+        )
+        # Hostname / vendor / MAC below the gateway
+        meta_lines = []
+        hn = gw.get("hostname") or ""
+        if hn and hn not in ("Unknown", ""):
+            meta_lines.append(hn[:28])
+        vd = gw.get("vendor") or ""
+        if vd and vd not in ("Unknown", "") and vd not in meta_lines:
+            meta_lines.append(vd[:28])
+        mac = gw.get("mac") or ""
+        if mac:
+            meta_lines.append(mac.upper())
+        for i, line in enumerate(meta_lines):
             canvas.create_text(
-                hx, label_y,
-                text=ip, fill=ip_color, font=(_SF, 8, "bold"),
+                cx, cy + gr + 14 + i * 13,
+                text=line, fill=_CLR_MUTED, font=(_SF, 8),
             )
 
-            # Hostname (preferred) or vendor under the IP
-            sub_label = host.get("hostname") or ""
-            if not sub_label and vendor and vendor not in ("Unknown", ""):
-                sub_label = vendor[:18] + ("…" if len(vendor) > 18 else "")
-            if sub_label:
-                canvas.create_text(
-                    hx, label_y + 13,
-                    text=sub_label[:20],
-                    fill="#555577" if not online else _CLR_MUTED,
-                    font=(_SF, 7),
-                )
+    def _draw_self(
+        self, canvas: tk.Canvas, sx: float, sy: float, node: dict,
+    ) -> None:
+        r = self._NODE_R
+        canvas.create_oval(
+            sx - r - 4, sy - r - 4, sx + r + 4, sy + r + 4,
+            fill="", outline=_CLR_ACCENT2, width=1,
+        )
+        canvas.create_oval(
+            sx - r, sy - r, sx + r, sy + r,
+            fill=_CLR_ACCENT2, outline="#ffffff", width=2,
+        )
+        canvas.create_text(sx, sy, text=node.get("icon") or "💻",
+                           font=(_SF, 14))
+        canvas.create_text(
+            sx, sy - r - 14,
+            text="THIS DEVICE", fill=_CLR_ACCENT2, font=(_SF, 8, "bold"),
+        )
+        canvas.create_text(
+            sx, sy + r + 13,
+            text=node.get("ip", ""), fill=_CLR_TEXT, font=(_SF, 8, "bold"),
+        )
+        hn = node.get("hostname") or ""
+        if hn and hn not in ("Unknown", ""):
+            canvas.create_text(
+                sx, sy + r + 26,
+                text=hn[:22], fill=_CLR_MUTED, font=(_SF, 7),
+            )
 
-            # "OFFLINE" badge for hosts that disappeared
-            if not online:
-                canvas.create_text(
-                    hx, hy, text="off",
-                    fill="#888899", font=(_SF, 7, "bold"),
-                )
+    def _draw_client(
+        self, canvas: tk.Canvas, hx: float, hy: float, host: dict,
+    ) -> None:
+        r = self._NODE_R
+        htype  = (host.get("type") or "").lower()
+        online = host.get("online", True)
+        icon   = host.get("icon") or ""
+
+        if not online:
+            fill, outline = "#2a2a44", "#444466"
+        elif "mobile" in htype or "phone" in htype or "ipad" in htype:
+            fill, outline = "#5bc0de", _CLR_TEXT
+        elif "printer" in htype:
+            fill, outline = _CLR_WARNING, _CLR_TEXT
+        elif "mac" in htype or "apple" in htype:
+            fill, outline = "#7c3aed", _CLR_TEXT
+        elif "tv" in htype or "console" in htype:
+            fill, outline = "#0ea5e9", _CLR_TEXT
+        else:
+            fill, outline = _CLR_ACCENT2, _CLR_TEXT
+
+        canvas.create_oval(
+            hx - r, hy - r, hx + r, hy + r,
+            fill=fill, outline=outline, width=1,
+        )
+        if icon:
+            canvas.create_text(hx, hy, text=icon, font=(_SF, 12))
+        if not online:
+            canvas.create_text(
+                hx, hy + 1, text="off",
+                fill="#888899", font=(_SF, 7, "bold"),
+            )
+
+        # Labels below the node
+        ip_color = _CLR_TEXT if online else "#555577"
+        canvas.create_text(
+            hx, hy + r + 13,
+            text=host.get("ip", "?"),
+            fill=ip_color, font=(_SF, 8, "bold"),
+        )
+        sub = host.get("hostname") or ""
+        if not sub:
+            vd = host.get("vendor") or ""
+            if vd and vd not in ("Unknown", ""):
+                sub = vd[:18] + ("…" if len(vd) > 18 else "")
+        if sub:
+            canvas.create_text(
+                hx, hy + r + 26,
+                text=sub[:20],
+                fill="#555577" if not online else _CLR_MUTED,
+                font=(_SF, 7),
+            )
 
 
 # ===========================================================================

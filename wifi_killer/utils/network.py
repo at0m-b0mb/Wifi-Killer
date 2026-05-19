@@ -56,29 +56,83 @@ except Exception:
 # Gateway
 # ---------------------------------------------------------------------------
 
+def _collect_local_ips() -> set[str]:
+    """Return the set of IPv4 addresses bound to this machine's interfaces.
+
+    Used to reject bogus gateway candidates: a real gateway never has the
+    same IP as one of our own interfaces.
+    """
+    local: set[str] = set()
+    try:
+        if _IS_LINUX or _IS_MACOS:
+            out = subprocess.check_output(
+                ["ifconfig"], text=True, timeout=5,
+                stderr=subprocess.DEVNULL,
+            )
+            for m in re.finditer(r"\binet\s+(\d+\.\d+\.\d+\.\d+)", out):
+                local.add(m.group(1))
+        elif _IS_WINDOWS:
+            out = subprocess.check_output(
+                ["ipconfig"], text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,  # type: ignore[attr-defined]
+            )
+            for m in re.finditer(
+                r"IPv4 Address[^:]*:\s*(\d+\.\d+\.\d+\.\d+)", out
+            ):
+                local.add(m.group(1))
+    except Exception:
+        pass
+    local.discard("0.0.0.0")
+    local.discard("127.0.0.1")
+    return local
+
+
+def _validate_gateway(candidate: Optional[str],
+                       local_ips: Optional[set[str]] = None) -> Optional[str]:
+    """Return *candidate* iff it looks like a real gateway IP.
+
+    Rejects: empty values, ``0.0.0.0``, link-local placeholders, anything
+    that matches one of our own interface IPs (a sure sign that Scapy's
+    routing table picked the wrong route on macOS).
+    """
+    if not candidate:
+        return None
+    candidate = candidate.strip()
+    if not re.match(r"^\d+\.\d+\.\d+\.\d+$", candidate):
+        return None
+    if candidate in ("0.0.0.0", "255.255.255.255"):
+        return None
+    if local_ips is None:
+        local_ips = _collect_local_ips()
+    if candidate in local_ips:
+        return None
+    return candidate
+
+
 def get_default_gateway() -> Optional[str]:
-    """Return the default gateway IP address."""
+    """Return the default gateway IP address.
 
-    # 1. Scapy routing table (cross-platform)
-    if _SCAPY_AVAILABLE:
-        try:
-            _, gw, _ = _scapy_conf.route.route("0.0.0.0")
-            if gw and gw != "0.0.0.0":
-                return gw
-        except Exception:
-            pass
+    Strategy: try OS-native routing-table commands first (authoritative
+    on every platform), validate the result against our own interface
+    IPs, and fall back to Scapy only if the native path fails. The
+    Scapy path on macOS sometimes returns the local IP instead of the
+    real gateway, which is why it is the last resort.
+    """
+    local_ips = _collect_local_ips()
 
-    # 2. Linux: /proc/net/route then ip route
+    # 1. Linux: /proc/net/route, then `ip route`
     if _IS_LINUX:
         try:
             with open("/proc/net/route") as fh:
                 for line in fh:
                     parts = line.strip().split()
                     if len(parts) >= 3 and parts[1] == "00000000":
-                        gateway_ip = socket.inet_ntoa(
+                        gw = socket.inet_ntoa(
                             struct.pack("<L", int(parts[2], 16))
                         )
-                        return gateway_ip
+                        valid = _validate_gateway(gw, local_ips)
+                        if valid:
+                            return valid
         except Exception:
             pass
         try:
@@ -86,20 +140,23 @@ def get_default_gateway() -> Optional[str]:
                 ["ip", "route", "show", "default"], text=True, timeout=5
             )
             m = re.search(r"default via (\d+\.\d+\.\d+\.\d+)", out)
-            if m:
-                return m.group(1)
+            valid = _validate_gateway(m.group(1) if m else None, local_ips)
+            if valid:
+                return valid
         except Exception:
             pass
 
-    # 3. macOS: route -n get default
+    # 2. macOS: route -n get default (authoritative), then netstat -rn
     elif _IS_MACOS:
         try:
             out = subprocess.check_output(
-                ["route", "-n", "get", "default"], text=True, timeout=5
+                ["route", "-n", "get", "default"], text=True, timeout=5,
+                stderr=subprocess.DEVNULL,
             )
             m = re.search(r"gateway:\s+(\d+\.\d+\.\d+\.\d+)", out)
-            if m:
-                return m.group(1)
+            valid = _validate_gateway(m.group(1) if m else None, local_ips)
+            if valid:
+                return valid
         except Exception:
             pass
         try:
@@ -109,13 +166,13 @@ def get_default_gateway() -> Optional[str]:
             for line in out.splitlines():
                 parts = line.split()
                 if parts and parts[0] == "default" and len(parts) >= 2:
-                    gw = parts[1]
-                    if re.match(r"^\d+\.\d+\.\d+\.\d+$", gw):
-                        return gw
+                    valid = _validate_gateway(parts[1], local_ips)
+                    if valid:
+                        return valid
         except Exception:
             pass
 
-    # 4. Windows: route print 0.0.0.0 then ipconfig
+    # 3. Windows: route print 0.0.0.0, then ipconfig
     elif _IS_WINDOWS:
         try:
             out = subprocess.check_output(
@@ -127,9 +184,9 @@ def get_default_gateway() -> Optional[str]:
                 parts = line.split()
                 if (len(parts) >= 3 and parts[0] == "0.0.0.0"
                         and parts[1] == "0.0.0.0"):
-                    gw = parts[2]
-                    if re.match(r"^\d+\.\d+\.\d+\.\d+$", gw):
-                        return gw
+                    valid = _validate_gateway(parts[2], local_ips)
+                    if valid:
+                        return valid
         except Exception:
             pass
         try:
@@ -138,9 +195,22 @@ def get_default_gateway() -> Optional[str]:
                 text=True, timeout=10,
                 creationflags=subprocess.CREATE_NO_WINDOW,  # type: ignore[attr-defined]
             )
-            m = re.search(r"Default Gateway[^:]*:\s*(\d+\.\d+\.\d+\.\d+)", out)
-            if m:
-                return m.group(1)
+            m = re.search(
+                r"Default Gateway[^:]*:\s*(\d+\.\d+\.\d+\.\d+)", out
+            )
+            valid = _validate_gateway(m.group(1) if m else None, local_ips)
+            if valid:
+                return valid
+        except Exception:
+            pass
+
+    # 4. Scapy (last resort — unreliable on macOS, but better than nothing)
+    if _SCAPY_AVAILABLE:
+        try:
+            _, gw, _ = _scapy_conf.route.route("0.0.0.0")
+            valid = _validate_gateway(gw, local_ips)
+            if valid:
+                return valid
         except Exception:
             pass
 

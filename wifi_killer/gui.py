@@ -2065,6 +2065,7 @@ class AttackFrame(ctk.CTkFrame):
         self._dns_spoofer = None
         self._conn_killer = None
         self._llmnr_poisoner = None
+        self._mdns_spoofer = None
         self._ntp_spoofer = None
         self._pcap_recorder = None
         # Live activity badges on each target row (keyed by victim IP).
@@ -2079,9 +2080,11 @@ class AttackFrame(ctk.CTkFrame):
         self._opt_dns_spoof = tk.BooleanVar(value=False)
         self._opt_conn_kill = tk.BooleanVar(value=False)
         self._opt_llmnr = tk.BooleanVar(value=False)
+        self._opt_mdns = tk.BooleanVar(value=False)
         self._opt_ntp_spoof = tk.BooleanVar(value=False)
         self._opt_pcap = tk.BooleanVar(value=False)
         # Inputs for the new modules.
+        self._mdns_pattern_var = tk.StringVar(value="*")  # all .local by default
         self._ntp_offset_var = tk.StringVar(value="3600")  # +1h default
         self._pcap_path_var = tk.StringVar(
             value=os.path.join(
@@ -2122,28 +2125,34 @@ class AttackFrame(ctk.CTkFrame):
         self._refresh_target_list()
 
     def _build(self) -> None:
-        # Row 0 header, 1 banner, 2 config card, 3 target picker (grows), 4 status
+        """Tabbed layout: Targets / Companions / Status, with a fixed top
+        bar holding the page header, the hazard banner, and the always-
+        visible Method + Gateway + Launch row.
+        """
+        # Rows: 0 header  ·  1 banner  ·  2 quick-config bar  ·  3 tabview (grows)
         self.grid_rowconfigure(3, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
         # ── Page header ───────────────────────────────────────────────
         header = _page_header(
-            self,
-            icon="⚡",
-            title="ARP Attack",
+            self, icon="⚡", title="ARP Attack",
             subtitle="ARP-spoofing attacks — authorised network testing only",
         )
-        header.grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 12))
+        header.grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 8))
+
+        # Selection-count badge in the header's right slot — always visible.
+        self._target_summary = ctk.CTkLabel(
+            header.right_slot, text="0 of 0 targets selected",
+            font=(_SF, 11, "bold"), text_color=_CLR_MUTED,
+        )
+        self._target_summary.pack(side="right", padx=(0, 2))
 
         # ── Hazard banner ─────────────────────────────────────────────
         banner = ctk.CTkFrame(
-            self,
-            fg_color=_shade(_CLR_DANGER, 0.25),
-            corner_radius=12,
-            border_width=1,
-            border_color=_CLR_DANGER,
+            self, fg_color=_shade(_CLR_DANGER, 0.25),
+            corner_radius=12, border_width=1, border_color=_CLR_DANGER,
         )
-        banner.grid(row=1, column=0, sticky="ew", padx=28, pady=(0, 14))
+        banner.grid(row=1, column=0, sticky="ew", padx=28, pady=(0, 10))
         ctk.CTkLabel(
             banner,
             text="⚠   Destructive: this will impersonate the gateway on your LAN. "
@@ -2153,22 +2162,22 @@ class AttackFrame(ctk.CTkFrame):
             anchor="w",
         ).pack(fill="x", padx=14, pady=10)
 
-        # ── Config card (method + gateway + launch buttons) ───────────
-        panel = ctk.CTkFrame(
+        # ── Quick-config bar: method + gateway + launch/stop (sticky) ─
+        cfg = ctk.CTkFrame(
             self, fg_color=_CLR_PANEL, corner_radius=14,
             border_width=1, border_color=_CLR_BORDER,
         )
-        panel.grid(row=2, column=0, padx=28, sticky="ew", pady=(0, 12))
-        panel.grid_columnconfigure(1, weight=1)
-        panel.grid_columnconfigure(3, weight=0)
+        cfg.grid(row=2, column=0, padx=28, pady=(0, 10), sticky="ew")
+        cfg.grid_columnconfigure(1, weight=0)
+        cfg.grid_columnconfigure(3, weight=0)
+        cfg.grid_columnconfigure(5, weight=1)
 
-        # Method
         ctk.CTkLabel(
-            panel, text="METHOD",
+            cfg, text="METHOD",
             font=(_SF, 9, "bold"), text_color=_CLR_MUTED,
-        ).grid(row=0, column=0, padx=(18, 12), pady=(16, 10), sticky="w")
+        ).grid(row=0, column=0, padx=(18, 10), pady=14, sticky="w")
         self._method = ctk.CTkComboBox(
-            panel, width=320, height=36, font=_FONT_LABEL,
+            cfg, width=280, height=36, font=_FONT_LABEL,
             values=[
                 "A – Full MITM (bi-directional)",
                 "B – Cut Client Only",
@@ -2180,64 +2189,75 @@ class AttackFrame(ctk.CTkFrame):
             dropdown_fg_color=_CLR_PANEL, dropdown_hover_color=_CLR_HOVER,
         )
         self._method.set("A – Full MITM (bi-directional)")
-        self._method.grid(row=0, column=1, padx=8, pady=(16, 10), sticky="w")
+        self._method.grid(row=0, column=1, padx=(0, 18), pady=14, sticky="w")
 
-        # Gateway override
         ctk.CTkLabel(
-            panel, text="GATEWAY IP",
+            cfg, text="GATEWAY IP",
             font=(_SF, 9, "bold"), text_color=_CLR_MUTED,
-        ).grid(row=0, column=2, padx=(20, 8), pady=(16, 10), sticky="e")
+        ).grid(row=0, column=2, padx=(0, 10), pady=14, sticky="w")
         self._gw_entry = ctk.CTkEntry(
-            panel, width=180, height=36, font=_FONT_LABEL,
+            cfg, width=160, height=36, font=_FONT_LABEL,
             placeholder_text="auto-detected",
             fg_color=_CLR_SIDEBAR,
             border_color=_CLR_BORDER, border_width=1,
         )
-        self._gw_entry.grid(row=0, column=3, padx=(0, 18), pady=(16, 10),
-                            sticky="e")
-
-        # Buttons row (full width)
-        btn_row = ctk.CTkFrame(panel, fg_color="transparent")
-        btn_row.grid(row=1, column=0, columnspan=4,
-                     padx=18, pady=(0, 16), sticky="ew")
+        self._gw_entry.grid(row=0, column=3, padx=(0, 18), pady=14, sticky="w")
 
         self._start_btn = _danger_button(
-            btn_row, text="⚡   Launch Attack",
+            cfg, text="⚡   Launch Attack",
             command=self._start_attack, width=180,
         )
-        self._start_btn.pack(side="left", padx=(0, 12))
+        self._start_btn.grid(row=0, column=4, padx=(0, 10), pady=14, sticky="e")
 
         self._stop_btn = _secondary_button(
-            btn_row, text="⏹   Stop & Restore",
-            command=self._stop_attack, width=180, height=40,
+            cfg, text="⏹   Stop & Restore",
+            command=self._stop_attack, width=170, height=40,
             state="disabled",
         )
-        self._stop_btn.pack(side="left")
+        self._stop_btn.grid(row=0, column=5, padx=(0, 18), pady=14, sticky="e")
 
-        # Selection-count badge sits to the right of the launch buttons.
-        self._target_summary = ctk.CTkLabel(
-            btn_row,
-            text="0 of 0 targets selected",
-            font=(_SF, 11, "bold"),
-            text_color=_CLR_MUTED,
+        # ── Tabview body (the bulk of the page) ───────────────────────
+        self._tabview = ctk.CTkTabview(
+            self,
+            fg_color=_CLR_PANEL,
+            segmented_button_fg_color=_CLR_SIDEBAR,
+            segmented_button_selected_color=_CLR_ACCENT,
+            segmented_button_selected_hover_color=_shade(_CLR_ACCENT, 0.85),
+            segmented_button_unselected_color=_CLR_SIDEBAR,
+            segmented_button_unselected_hover_color=_CLR_HOVER,
+            text_color=_CLR_TEXT,
+            border_color=_CLR_BORDER, border_width=1,
+            corner_radius=14,
         )
-        self._target_summary.pack(side="right")
+        self._tabview.grid(row=3, column=0, padx=28, pady=(0, 22),
+                           sticky="nsew")
+        self._tabview.add("🎯  Targets")
+        self._tabview.add("🧰  Companion Modules")
+        self._tabview.add("📊  Live Status")
 
-        # ── Target picker card ────────────────────────────────────────
-        picker = ctk.CTkFrame(
-            self, fg_color=_CLR_PANEL, corner_radius=14,
-            border_width=1, border_color=_CLR_BORDER,
-        )
-        picker.grid(row=3, column=0, padx=28, pady=(0, 12), sticky="nsew")
-        picker.grid_columnconfigure(0, weight=1)
-        picker.grid_rowconfigure(3, weight=1)
+        self._build_targets_tab(self._tabview.tab("🎯  Targets"))
+        self._build_companions_tab(self._tabview.tab("🧰  Companion Modules"))
+        self._build_status_tab(self._tabview.tab("📊  Live Status"))
+
+        self._timer_id = None
+
+        # Initial population (after construction is complete)
+        self.after(50, self._refresh_target_list)
+
+    # ------------------------------------------------------------------ #
+    # Tab builders                                                         #
+    # ------------------------------------------------------------------ #
+
+    def _build_targets_tab(self, parent) -> None:
+        parent.grid_rowconfigure(2, weight=1)
+        parent.grid_columnconfigure(0, weight=1)
 
         # Title + count
-        title_row = ctk.CTkFrame(picker, fg_color="transparent")
-        title_row.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 4))
+        title_row = ctk.CTkFrame(parent, fg_color="transparent")
+        title_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(10, 4))
         title_row.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            title_row, text="Targets",
+            title_row, text="Choose victims",
             font=_FONT_HEAD, text_color=_CLR_TEXT, anchor="w",
         ).grid(row=0, column=0, sticky="w")
         self._picker_count = ctk.CTkLabel(
@@ -2246,341 +2266,301 @@ class AttackFrame(ctk.CTkFrame):
         )
         self._picker_count.grid(row=0, column=1, sticky="e")
 
-        # Filter input + quick-select buttons
-        ctrl_row = ctk.CTkFrame(picker, fg_color="transparent")
-        ctrl_row.grid(row=1, column=0, sticky="ew", padx=14, pady=(8, 6))
+        # Filter row
+        ctrl_row = ctk.CTkFrame(parent, fg_color="transparent")
+        ctrl_row.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 4))
         ctrl_row.grid_columnconfigure(0, weight=1)
 
         self._filter_entry = ctk.CTkEntry(
             ctrl_row, textvariable=self._filter_var, height=32,
             placeholder_text="Filter by IP, hostname, vendor, or type…",
             font=_FONT_LABEL,
-            fg_color=_CLR_SIDEBAR,
-            border_color=_CLR_BORDER, border_width=1,
+            fg_color=_CLR_SIDEBAR, border_color=_CLR_BORDER, border_width=1,
         )
         self._filter_entry.grid(row=0, column=0, sticky="ew", padx=(4, 8))
         self._filter_var.trace_add("write", lambda *_: self._apply_filter())
-
         _ghost_button(
             ctrl_row, text="✕", width=32, height=32,
             command=lambda: self._filter_var.set(""),
             font=_FONT_LABEL,
         ).grid(row=0, column=1, padx=(0, 8))
-
         _ghost_button(
             ctrl_row, text="🔄  Refresh", width=110, height=32,
             command=self._refresh_target_list, font=_FONT_SMALL,
-        ).grid(row=0, column=2)
+        ).grid(row=0, column=2, padx=(0, 4))
 
-        # Quick-select chip row
-        chip_row = ctk.CTkFrame(picker, fg_color="transparent")
-        chip_row.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 8))
+        # Quick-select chip row (wraps onto its own line so it stays readable)
+        chip_row = ctk.CTkFrame(parent, fg_color="transparent")
+        chip_row.grid(row=2, column=0, sticky="new", padx=4, pady=(2, 6))
+        chip_row.grid_propagate(True)
         for label, fn in [
-            ("☑   All",         self._select_all_visible),
-            ("☐   None",        self._select_none),
-            ("🟢   Online",     self._select_online),
-            ("💻   Macs / PCs", self._select_computers),
-            ("📱   Phones",     self._select_phones),
-            ("📺   TVs / Cast", self._select_media),
-            ("🖨   Printers",  self._select_printers),
-            ("❓   Unknown",    self._select_unknown),
+            ("☑   All",          self._select_all_visible),
+            ("☐   None",         self._select_none),
+            ("🟢   Online",      self._select_online),
+            ("💻   Macs / PCs",  self._select_computers),
+            ("📱   Phones",      self._select_phones),
+            ("📺   TVs / Cast",  self._select_media),
+            ("🖨   Printers",    self._select_printers),
+            ("❓   Unknown",     self._select_unknown),
         ]:
             _ghost_button(
                 chip_row, text=label, command=fn,
                 width=0, height=28, font=_FONT_SMALL,
             ).pack(side="left", padx=(0, 6))
 
-        # Scrollable list of hosts (rows built in _refresh_target_list)
+        # Scrollable list of hosts — given a dedicated grid row that grows.
+        # Move the chip row up to row=1.5 by inserting another grid row.
+        parent.grid_rowconfigure(3, weight=1)
         self._target_list = ctk.CTkScrollableFrame(
-            picker, fg_color="transparent", corner_radius=0,
+            parent, fg_color=_CLR_BG, corner_radius=10,
         )
         self._target_list.grid(row=3, column=0, sticky="nsew",
-                               padx=10, pady=(0, 12))
+                               padx=4, pady=(0, 6))
         self._target_list.grid_columnconfigure(0, weight=1)
 
-        # ── Status card ───────────────────────────────────────────────
-        # ── Companion modules card (MITM Inspector + DNS Spoofer) ─────
-        comp = ctk.CTkFrame(
-            self, fg_color=_CLR_PANEL, corner_radius=14,
-            border_width=1, border_color=_CLR_BORDER,
+    def _build_companions_tab(self, parent) -> None:
+        """All 7 companion-module toggles in a single scrollable column."""
+        parent.grid_rowconfigure(0, weight=1)
+        parent.grid_columnconfigure(0, weight=1)
+
+        scroll = ctk.CTkScrollableFrame(
+            parent, fg_color="transparent", corner_radius=0,
         )
-        comp.grid(row=4, column=0, padx=28, pady=(0, 12), sticky="ew")
-        comp.grid_columnconfigure(0, weight=1)
+        scroll.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        scroll.grid_columnconfigure(0, weight=1)
 
-        comp_title = ctk.CTkFrame(comp, fg_color="transparent")
-        comp_title.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 4))
-        comp_title.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            comp_title, text="Companion Modules",
-            font=_FONT_HEAD, text_color=_CLR_TEXT, anchor="w",
-        ).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(
-            comp_title, text="Auto-start with attack",
-            font=(_SF, 9, "bold"), text_color=_CLR_MUTED, anchor="e",
-        ).grid(row=0, column=1, sticky="e")
+        # Helper to build one toggle card with a consistent look.
+        def card(icon: str, title: str, desc: str, var: tk.BooleanVar,
+                 row: int) -> ctk.CTkFrame:
+            card = ctk.CTkFrame(
+                scroll, fg_color=_CLR_SIDEBAR, corner_radius=12,
+                border_width=1, border_color=_CLR_BORDER,
+            )
+            card.grid(row=row, column=0, sticky="ew", padx=6, pady=6)
+            card.grid_columnconfigure(2, weight=1)
+            ctk.CTkCheckBox(
+                card, text="", variable=var,
+                checkbox_width=20, checkbox_height=20,
+                fg_color=_CLR_ACCENT,
+                hover_color=_shade(_CLR_ACCENT, 0.85),
+                border_color=_CLR_BORDER, width=28,
+            ).grid(row=0, column=0, padx=(14, 8), pady=(12, 0), sticky="nw")
+            ctk.CTkLabel(
+                card, text=icon, font=(_SF, 18),
+            ).grid(row=0, column=1, padx=(0, 10), pady=(10, 0), sticky="nw")
+            ctk.CTkLabel(
+                card, text=title,
+                font=_FONT_NAME, text_color=_CLR_TEXT, anchor="w",
+            ).grid(row=0, column=2, sticky="w", padx=(0, 14), pady=(12, 0))
+            ctk.CTkLabel(
+                card, text=desc,
+                font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
+                justify="left", wraplength=520,
+            ).grid(row=1, column=2, sticky="w", padx=(0, 14), pady=(0, 12))
+            return card
 
-        # Inspector toggle row
-        insp_row = ctk.CTkFrame(comp, fg_color="transparent")
-        insp_row.grid(row=1, column=0, sticky="ew", padx=18, pady=(6, 0))
-        insp_row.grid_columnconfigure(1, weight=1)
-        ctk.CTkCheckBox(
-            insp_row, text="", variable=self._opt_inspect,
-            checkbox_width=18, checkbox_height=18,
-            fg_color=_CLR_ACCENT,
-            hover_color=_shade(_CLR_ACCENT, 0.85),
-            border_color=_CLR_BORDER, width=24,
-        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
-        ctk.CTkLabel(
-            insp_row, text="🔭   MITM Inspector",
-            font=_FONT_NAME, text_color=_CLR_TEXT, anchor="w",
-        ).grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(
-            insp_row,
-            text="Captures DNS queries, TLS SNI, and HTTP hosts from victims",
-            font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
-        ).grid(row=1, column=1, sticky="w", pady=(0, 6))
-
-        # DNS spoofer toggle row + rules
-        spoof_row = ctk.CTkFrame(comp, fg_color="transparent")
-        spoof_row.grid(row=2, column=0, sticky="ew", padx=18, pady=(6, 4))
-        spoof_row.grid_columnconfigure(1, weight=1)
-        ctk.CTkCheckBox(
-            spoof_row, text="", variable=self._opt_dns_spoof,
-            checkbox_width=18, checkbox_height=18,
-            fg_color=_CLR_ACCENT,
-            hover_color=_shade(_CLR_ACCENT, 0.85),
-            border_color=_CLR_BORDER, width=24,
-        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
-        ctk.CTkLabel(
-            spoof_row, text="🎯   DNS Spoofer",
-            font=_FONT_NAME, text_color=_CLR_TEXT, anchor="w",
-        ).grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(
-            spoof_row,
-            text="Returns forged DNS replies for matching domains "
-                 "(e.g. ad-domain → 0.0.0.0)",
-            font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
-        ).grid(row=1, column=1, sticky="w", pady=(0, 6))
-
-        # DNS rules table
-        rules_card = ctk.CTkFrame(
-            comp, fg_color=_CLR_SIDEBAR, corner_radius=10,
-            border_width=1, border_color=_CLR_BORDER,
+        # 1) MITM Inspector
+        card(
+            "🔭", "MITM Inspector",
+            "Passive sniffer that captures DNS queries, TLS SNI hostnames, "
+            "HTTP request URLs and plaintext credentials from each victim.",
+            self._opt_inspect, row=0,
         )
-        rules_card.grid(row=3, column=0, sticky="ew", padx=18, pady=(4, 12))
-        rules_card.grid_columnconfigure(0, weight=1)
 
-        rules_hdr = ctk.CTkFrame(rules_card, fg_color="transparent")
-        rules_hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
-        rules_hdr.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            rules_hdr, text="DOMAIN  →  REDIRECT TO",
-            font=(_SF, 9, "bold"), text_color=_CLR_MUTED, anchor="w",
-        ).grid(row=0, column=0, sticky="w")
-        _ghost_button(
-            rules_hdr, text="➕   Add rule", width=110, height=28,
-            command=self._add_dns_rule_row, font=_FONT_SMALL,
-        ).grid(row=0, column=1, sticky="e")
-
-        self._dns_rules_body = ctk.CTkFrame(
-            rules_card, fg_color="transparent",
+        # 2) DNS Spoofer (with rule table inline)
+        dns_card = card(
+            "🎯", "DNS Spoofer",
+            "Returns forged DNS replies for matching domain patterns "
+            "(e.g. ad-domain → 0.0.0.0 to null-route ads).",
+            self._opt_dns_spoof, row=1,
         )
-        self._dns_rules_body.grid(row=1, column=0, sticky="ew",
-                                  padx=10, pady=(0, 10))
-        self._dns_rules_body.grid_columnconfigure(0, weight=1)
-
-        # Two helpful starter rows so users can see the format.
+        self._build_rule_subcard(
+            dns_card,
+            title="DOMAIN  →  REDIRECT TO",
+            add_cb=self._add_dns_rule_row,
+            holder_attr="_dns_rules_body",
+        )
         self._add_dns_rule_row(pattern="*.example.com", ip="10.0.0.1")
         self._add_dns_rule_row(pattern="", ip="")
 
-        # Connection killer toggle row
-        kill_row = ctk.CTkFrame(comp, fg_color="transparent")
-        kill_row.grid(row=4, column=0, sticky="ew", padx=18, pady=(6, 4))
-        kill_row.grid_columnconfigure(1, weight=1)
-        ctk.CTkCheckBox(
-            kill_row, text="", variable=self._opt_conn_kill,
-            checkbox_width=18, checkbox_height=18,
-            fg_color=_CLR_ACCENT,
-            hover_color=_shade(_CLR_ACCENT, 0.85),
-            border_color=_CLR_BORDER, width=24,
-        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
-        ctk.CTkLabel(
-            kill_row, text="🔪   TCP Connection Killer",
-            font=_FONT_NAME, text_color=_CLR_TEXT, anchor="w",
-        ).grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(
-            kill_row,
-            text="Send RST packets to terminate specific connections "
-                 "(by host or port)",
-            font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
-        ).grid(row=1, column=1, sticky="w", pady=(0, 6))
-
-        kill_card = ctk.CTkFrame(
-            comp, fg_color=_CLR_SIDEBAR, corner_radius=10,
-            border_width=1, border_color=_CLR_BORDER,
+        # 3) TCP Connection Killer (with rule table inline)
+        kill_card = card(
+            "🔪", "TCP Connection Killer",
+            "Sends RST packets to terminate specific connections by "
+            "destination host or port (e.g. cut *.twitter.com only).",
+            self._opt_conn_kill, row=2,
         )
-        kill_card.grid(row=5, column=0, sticky="ew", padx=18, pady=(4, 14))
-        kill_card.grid_columnconfigure(0, weight=1)
-
-        kill_hdr = ctk.CTkFrame(kill_card, fg_color="transparent")
-        kill_hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
-        kill_hdr.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            kill_hdr,
-            text="TARGET HOST / IP / CIDR   ·   PORT  (0 = any)",
-            font=(_SF, 9, "bold"), text_color=_CLR_MUTED, anchor="w",
-        ).grid(row=0, column=0, sticky="w")
-        _ghost_button(
-            kill_hdr, text="➕   Add rule", width=110, height=28,
-            command=self._add_kill_rule_row, font=_FONT_SMALL,
-        ).grid(row=0, column=1, sticky="e")
-
-        self._kill_rules_body = ctk.CTkFrame(kill_card, fg_color="transparent")
-        self._kill_rules_body.grid(row=1, column=0, sticky="ew",
-                                    padx=10, pady=(0, 10))
-        self._kill_rules_body.grid_columnconfigure(0, weight=1)
-
-        # Helpful starter rows.
+        self._build_rule_subcard(
+            kill_card,
+            title="TARGET HOST / IP / CIDR   ·   PORT  (0 = any)",
+            add_cb=self._add_kill_rule_row,
+            holder_attr="_kill_rules_body",
+        )
         self._add_kill_rule_row(pattern="*.example.com", port="443")
         self._add_kill_rule_row(pattern="", port="0")
 
-        # ── LLMNR / NBT-NS Responder toggle ───────────────────────────
-        llmnr_row = ctk.CTkFrame(comp, fg_color="transparent")
-        llmnr_row.grid(row=6, column=0, sticky="ew", padx=18, pady=(6, 4))
-        llmnr_row.grid_columnconfigure(1, weight=1)
-        ctk.CTkCheckBox(
-            llmnr_row, text="", variable=self._opt_llmnr,
-            checkbox_width=18, checkbox_height=18,
-            fg_color=_CLR_ACCENT,
-            hover_color=_shade(_CLR_ACCENT, 0.85),
-            border_color=_CLR_BORDER, width=24,
-        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
-        ctk.CTkLabel(
-            llmnr_row, text="🕷   LLMNR / NBT-NS Responder",
-            font=_FONT_NAME, text_color=_CLR_TEXT, anchor="w",
-        ).grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(
-            llmnr_row,
-            text="Answers Windows multicast/broadcast name queries with our "
-                 "IP (RFC 4795 + RFC 1002)",
-            font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
-        ).grid(row=1, column=1, sticky="w", pady=(0, 6))
+        # 4) LLMNR / NBT-NS Responder
+        card(
+            "🕷", "LLMNR / NBT-NS Responder",
+            "Answers Windows multicast (LLMNR, UDP 5355) and broadcast "
+            "(NBT-NS, UDP 137) name queries with our IP — RFC 4795 / 1002.",
+            self._opt_llmnr, row=3,
+        )
 
-        # ── NTP Spoofer toggle + offset input ─────────────────────────
-        ntp_row = ctk.CTkFrame(comp, fg_color="transparent")
-        ntp_row.grid(row=7, column=0, sticky="ew", padx=18, pady=(6, 4))
-        ntp_row.grid_columnconfigure(1, weight=1)
-        ctk.CTkCheckBox(
-            ntp_row, text="", variable=self._opt_ntp_spoof,
-            checkbox_width=18, checkbox_height=18,
-            fg_color=_CLR_ACCENT,
-            hover_color=_shade(_CLR_ACCENT, 0.85),
-            border_color=_CLR_BORDER, width=24,
-        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
-        ctk.CTkLabel(
-            ntp_row, text="🕓   NTP Spoofer",
-            font=_FONT_NAME, text_color=_CLR_TEXT, anchor="w",
-        ).grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(
-            ntp_row,
-            text="Skews the victim's clock by the offset below — useful for "
-                 "demonstrating time-based attacks against TLS / Kerberos",
-            font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
-        ).grid(row=1, column=1, sticky="w", pady=(0, 6))
+        # 5) mDNS Spoofer (with pattern input inline)
+        mdns_card = card(
+            "🍏", "mDNS Spoofer",
+            "Apple/Linux equivalent of LLMNR — answers .local queries on "
+            "UDP 5353 / multicast 224.0.0.251 (RFC 6762). Useful against "
+            "macOS / iOS / IoT devices.",
+            self._opt_mdns, row=4,
+        )
+        self._build_input_subcard(
+            mdns_card,
+            label="NAME PATTERN",
+            var=self._mdns_pattern_var,
+            placeholder="* (all .local) or e.g. printer.local",
+        )
 
-        ntp_input = ctk.CTkFrame(comp, fg_color=_CLR_SIDEBAR,
-                                  corner_radius=10, border_width=1,
-                                  border_color=_CLR_BORDER)
-        ntp_input.grid(row=8, column=0, sticky="ew", padx=18, pady=(0, 10))
-        ntp_input.grid_columnconfigure(1, weight=1)
+        # 6) NTP Spoofer (with offset input inline)
+        ntp_card = card(
+            "🕓", "NTP Spoofer",
+            "Skews the victim's clock by the offset below. Demonstrates "
+            "time-based attacks against TLS / Kerberos / token expiry.",
+            self._opt_ntp_spoof, row=5,
+        )
+        self._build_input_subcard(
+            ntp_card,
+            label="OFFSET (seconds)",
+            var=self._ntp_offset_var,
+            placeholder="e.g. 3600 = +1h, -86400 = -1 day",
+        )
+
+        # 7) PCAP Recorder (with file path + browse button inline)
+        pcap_card = card(
+            "💾", "PCAP Recorder",
+            "Save MITM traffic to a Wireshark-readable .pcap file. "
+            "Filtered to the attacked target IPs; capped at 200 MB.",
+            self._opt_pcap, row=6,
+        )
+        self._build_pcap_subcard(pcap_card)
+
+    def _build_rule_subcard(
+        self, parent, title: str, add_cb, holder_attr: str,
+    ) -> None:
+        """Add a rule-list sub-panel under a companion card."""
+        wrap = ctk.CTkFrame(
+            parent, fg_color=_CLR_BG, corner_radius=10,
+            border_width=1, border_color=_CLR_BORDER,
+        )
+        wrap.grid(row=2, column=0, columnspan=3, sticky="ew",
+                  padx=14, pady=(0, 14))
+        wrap.grid_columnconfigure(0, weight=1)
+
+        hdr = ctk.CTkFrame(wrap, fg_color="transparent")
+        hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+        hdr.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            ntp_input, text="OFFSET (seconds)",
+            hdr, text=title,
+            font=(_SF, 9, "bold"), text_color=_CLR_MUTED, anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        _ghost_button(
+            hdr, text="➕   Add rule", width=110, height=28,
+            command=add_cb, font=_FONT_SMALL,
+        ).grid(row=0, column=1, sticky="e")
+
+        body = ctk.CTkFrame(wrap, fg_color="transparent")
+        body.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        body.grid_columnconfigure(0, weight=1)
+        setattr(self, holder_attr, body)
+
+    def _build_input_subcard(
+        self, parent, label: str, var: tk.StringVar, placeholder: str,
+    ) -> None:
+        wrap = ctk.CTkFrame(
+            parent, fg_color=_CLR_BG, corner_radius=10,
+            border_width=1, border_color=_CLR_BORDER,
+        )
+        wrap.grid(row=2, column=0, columnspan=3, sticky="ew",
+                  padx=14, pady=(0, 14))
+        wrap.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            wrap, text=label,
             font=(_SF, 9, "bold"), text_color=_CLR_MUTED,
         ).grid(row=0, column=0, padx=(14, 10), pady=10)
         ctk.CTkEntry(
-            ntp_input, textvariable=self._ntp_offset_var, height=30,
-            placeholder_text="e.g. 3600 = +1h, -86400 = -1 day",
+            wrap, textvariable=var, height=30,
+            placeholder_text=placeholder,
             font=_FONT_MONO,
-            fg_color=_CLR_BG, border_color=_CLR_BORDER, border_width=1,
+            fg_color=_CLR_SIDEBAR, border_color=_CLR_BORDER, border_width=1,
         ).grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=10)
 
-        # ── PCAP Recorder toggle + output path ────────────────────────
-        pcap_row = ctk.CTkFrame(comp, fg_color="transparent")
-        pcap_row.grid(row=9, column=0, sticky="ew", padx=18, pady=(6, 4))
-        pcap_row.grid_columnconfigure(1, weight=1)
-        ctk.CTkCheckBox(
-            pcap_row, text="", variable=self._opt_pcap,
-            checkbox_width=18, checkbox_height=18,
-            fg_color=_CLR_ACCENT,
-            hover_color=_shade(_CLR_ACCENT, 0.85),
-            border_color=_CLR_BORDER, width=24,
-        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+    def _build_pcap_subcard(self, parent) -> None:
+        wrap = ctk.CTkFrame(
+            parent, fg_color=_CLR_BG, corner_radius=10,
+            border_width=1, border_color=_CLR_BORDER,
+        )
+        wrap.grid(row=2, column=0, columnspan=3, sticky="ew",
+                  padx=14, pady=(0, 14))
+        wrap.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(
-            pcap_row, text="💾   PCAP Recorder",
-            font=_FONT_NAME, text_color=_CLR_TEXT, anchor="w",
-        ).grid(row=0, column=1, sticky="w")
-        ctk.CTkLabel(
-            pcap_row,
-            text="Save all MITM'd traffic to a Wireshark-readable .pcap file",
-            font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
-        ).grid(row=1, column=1, sticky="w", pady=(0, 6))
-
-        pcap_input = ctk.CTkFrame(comp, fg_color=_CLR_SIDEBAR,
-                                   corner_radius=10, border_width=1,
-                                   border_color=_CLR_BORDER)
-        pcap_input.grid(row=10, column=0, sticky="ew", padx=18, pady=(0, 14))
-        pcap_input.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(
-            pcap_input, text="OUTPUT FILE",
+            wrap, text="OUTPUT FILE",
             font=(_SF, 9, "bold"), text_color=_CLR_MUTED,
         ).grid(row=0, column=0, padx=(14, 10), pady=10)
         ctk.CTkEntry(
-            pcap_input, textvariable=self._pcap_path_var, height=30,
+            wrap, textvariable=self._pcap_path_var, height=30,
             placeholder_text="~/wifi-killer-session.pcap",
             font=_FONT_MONO,
-            fg_color=_CLR_BG, border_color=_CLR_BORDER, border_width=1,
+            fg_color=_CLR_SIDEBAR, border_color=_CLR_BORDER, border_width=1,
         ).grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=10)
         _ghost_button(
-            pcap_input, text="📁   Browse…", width=110, height=30,
+            wrap, text="📁   Browse…", width=110, height=30,
             command=self._pick_pcap_path, font=_FONT_SMALL,
         ).grid(row=0, column=2, padx=(0, 14), pady=10)
 
-        # ── Status card ───────────────────────────────────────────────
-        status_card = ctk.CTkFrame(
-            self, fg_color=_CLR_PANEL, corner_radius=14,
+    def _build_status_tab(self, parent) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+
+        # Big stat-cards strip — 4 cards for uptime / packets / pps / companions.
+        cards = ctk.CTkFrame(parent, fg_color="transparent")
+        cards.grid(row=0, column=0, sticky="ew", padx=4, pady=(8, 4))
+        for i in range(4):
+            cards.grid_columnconfigure(i, weight=1, uniform="status")
+        self._stat_uptime = _stat_card(cards, "⏱", "Uptime",  "—", 0, _CLR_TEXT)
+        self._stat_pkt    = _stat_card(cards, "📦", "Packets", "0", 1, _CLR_SUCCESS)
+        self._stat_rate   = _stat_card(cards, "⚡", "Rate",    "0 pkt/s", 2, _CLR_ACCENT)
+        self._stat_comp   = _stat_card(cards, "🧰", "Active",  "0", 3, _CLR_ACCENT2)
+
+        # Main status text — same widget the rest of the code already targets.
+        text_card = ctk.CTkFrame(
+            parent, fg_color=_CLR_SIDEBAR, corner_radius=12,
             border_width=1, border_color=_CLR_BORDER,
         )
-        status_card.grid(row=5, column=0, padx=28, pady=(0, 22), sticky="ew")
-        status_card.grid_columnconfigure(0, weight=1)
-
+        text_card.grid(row=1, column=0, sticky="ew", padx=8, pady=(8, 4))
+        text_card.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            status_card, text="STATUS",
+            text_card, text="STATUS",
             font=(_SF, 9, "bold"), text_color=_CLR_MUTED, anchor="w",
-        ).grid(row=0, column=0, padx=18, pady=(14, 0), sticky="w")
-
+        ).grid(row=0, column=0, padx=18, pady=(12, 0), sticky="w")
         self._status_label = ctk.CTkLabel(
-            status_card, text="Idle",
-            font=(_SF, 15, "bold"), text_color=_CLR_MUTED, anchor="w",
+            text_card, text="Idle",
+            font=(_SF, 17, "bold"), text_color=_CLR_MUTED, anchor="w",
         )
-        self._status_label.grid(row=1, column=0, padx=18, pady=(2, 4), sticky="w")
-
-        # Telemetry strip: uptime · packets · pps · companion summary
+        self._status_label.grid(row=1, column=0, padx=18, pady=(2, 4),
+                                 sticky="w")
         self._pkt_label = ctk.CTkLabel(
-            status_card, text="",
+            text_card, text="",
             font=_FONT_MONO, text_color=_CLR_SUCCESS, anchor="w",
         )
-        self._pkt_label.grid(row=2, column=0, padx=18, pady=(0, 2), sticky="w")
+        self._pkt_label.grid(row=2, column=0, padx=18, pady=(0, 2),
+                              sticky="w")
         self._companion_label = ctk.CTkLabel(
-            status_card, text="",
+            text_card, text="",
             font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
+            justify="left", wraplength=900,
         )
-        self._companion_label.grid(row=3, column=0, padx=18, pady=(0, 14),
-                                   sticky="w")
-
-        self._timer_id = None
-
-        # Initial population (after construction is complete)
-        self.after(50, self._refresh_target_list)
+        self._companion_label.grid(row=3, column=0, padx=18, pady=(0, 12),
+                                    sticky="w")
 
     # ------------------------------------------------------------------ #
     # DNS spoof rules                                                      #
@@ -3058,6 +3038,16 @@ class AttackFrame(ctk.CTkFrame):
                     "LLMNR/NBT-NS Responder skipped — local IP unknown.",
                     "warn",
                 )
+        if self._opt_mdns.get():
+            own_ip = self._app._get_own_ip()
+            pattern = self._mdns_pattern_var.get().strip() or "*"
+            if own_ip and own_ip not in ("?", ""):
+                self._start_mdns_spoofer(own_ip, [pattern])
+            else:
+                self._app.log(
+                    "mDNS Spoofer skipped — local IP unknown.",
+                    "warn",
+                )
         if self._opt_ntp_spoof.get():
             try:
                 offset = float(self._ntp_offset_var.get().strip() or "0")
@@ -3162,6 +3152,26 @@ class AttackFrame(ctk.CTkFrame):
             self._llmnr_poisoner = None
             self._app.log(f"LLMNR Responder failed: {exc}", "err")
 
+    def _start_mdns_spoofer(
+        self, answer_ip: str, patterns: list[str],
+    ) -> None:
+        try:
+            from wifi_killer.modules.mdns_spoofer import MDNSSpoofer
+            own_name = socket.gethostname().split(".")[0]
+            exclude = {own_name, f"{own_name}.local"}
+            self._mdns_spoofer = MDNSSpoofer(
+                self._app._iface, answer_ip,
+                patterns=patterns, exclude_names=exclude,
+            )
+            self._mdns_spoofer.start()
+            self._app.log(
+                f"mDNS Spoofer running → answering {patterns} as {answer_ip}",
+                "warn",
+            )
+        except Exception as exc:
+            self._mdns_spoofer = None
+            self._app.log(f"mDNS Spoofer failed: {exc}", "err")
+
     def _start_ntp_spoofer(
         self, offset: float, attacked_ips: list[str],
     ) -> None:
@@ -3241,6 +3251,17 @@ class AttackFrame(ctk.CTkFrame):
             except Exception:
                 pass
             self._llmnr_poisoner = None
+        if self._mdns_spoofer is not None:
+            try:
+                hits = self._mdns_spoofer.hits
+                self._mdns_spoofer.stop()
+                self._app.log(
+                    f"mDNS Spoofer stopped — {hits} .local query/queries poisoned.",
+                    "ok",
+                )
+            except Exception:
+                pass
+            self._mdns_spoofer = None
         if self._ntp_spoofer is not None:
             try:
                 hits = self._ntp_spoofer.hits
@@ -3326,6 +3347,21 @@ class AttackFrame(ctk.CTkFrame):
             )
         )
 
+        # Mirror into the dedicated Status-tab stat cards if present.
+        if getattr(self, "_stat_uptime", None) is not None:
+            self._stat_uptime.configure(text=uptime, text_color=_CLR_TEXT)
+            self._stat_pkt.configure(text=f"{packets:,}",
+                                    text_color=_CLR_SUCCESS)
+            self._stat_rate.configure(text=f"{rate:.1f} pkt/s",
+                                     text_color=_CLR_ACCENT)
+            active_companions = sum(1 for x in [
+                self._mitm_inspector, self._dns_spoofer,
+                self._conn_killer, self._llmnr_poisoner,
+                self._mdns_spoofer, self._ntp_spoofer, self._pcap_recorder,
+            ] if x is not None)
+            self._stat_comp.configure(text=str(active_companions),
+                                       text_color=_CLR_ACCENT2)
+
         # ── Companion summary line ────────────────────────────────────
         bits: list[str] = []
         if self._mitm_inspector is not None:
@@ -3378,6 +3414,9 @@ class AttackFrame(ctk.CTkFrame):
         if self._llmnr_poisoner is not None:
             snap = self._llmnr_poisoner.snapshot()
             bits.append(f"🕷 LLMNR/NBNS: {snap['hits']} poisoned")
+        if self._mdns_spoofer is not None:
+            snap = self._mdns_spoofer.snapshot()
+            bits.append(f"🍏 mDNS: {snap['hits']} poisoned")
         if self._ntp_spoofer is not None:
             snap = self._ntp_spoofer.snapshot()
             sign = "+" if snap["offset"] >= 0 else ""

@@ -2064,6 +2064,9 @@ class AttackFrame(ctk.CTkFrame):
         self._mitm_inspector = None
         self._dns_spoofer = None
         self._conn_killer = None
+        self._llmnr_poisoner = None
+        self._ntp_spoofer = None
+        self._pcap_recorder = None
         # Live activity badges on each target row (keyed by victim IP).
         # Populated only while the MITM Inspector is running.
         self._row_activity_labels: dict[str, ctk.CTkLabel] = {}
@@ -2075,6 +2078,16 @@ class AttackFrame(ctk.CTkFrame):
         self._opt_inspect = tk.BooleanVar(value=True)
         self._opt_dns_spoof = tk.BooleanVar(value=False)
         self._opt_conn_kill = tk.BooleanVar(value=False)
+        self._opt_llmnr = tk.BooleanVar(value=False)
+        self._opt_ntp_spoof = tk.BooleanVar(value=False)
+        self._opt_pcap = tk.BooleanVar(value=False)
+        # Inputs for the new modules.
+        self._ntp_offset_var = tk.StringVar(value="3600")  # +1h default
+        self._pcap_path_var = tk.StringVar(
+            value=os.path.join(
+                os.path.expanduser("~"), "wifi-killer-session.pcap",
+            )
+        )
         self._build()
 
     # ------------------------------------------------------------------ #
@@ -2431,6 +2444,107 @@ class AttackFrame(ctk.CTkFrame):
         self._add_kill_rule_row(pattern="*.example.com", port="443")
         self._add_kill_rule_row(pattern="", port="0")
 
+        # ── LLMNR / NBT-NS Responder toggle ───────────────────────────
+        llmnr_row = ctk.CTkFrame(comp, fg_color="transparent")
+        llmnr_row.grid(row=6, column=0, sticky="ew", padx=18, pady=(6, 4))
+        llmnr_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkCheckBox(
+            llmnr_row, text="", variable=self._opt_llmnr,
+            checkbox_width=18, checkbox_height=18,
+            fg_color=_CLR_ACCENT,
+            hover_color=_shade(_CLR_ACCENT, 0.85),
+            border_color=_CLR_BORDER, width=24,
+        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+        ctk.CTkLabel(
+            llmnr_row, text="🕷   LLMNR / NBT-NS Responder",
+            font=_FONT_NAME, text_color=_CLR_TEXT, anchor="w",
+        ).grid(row=0, column=1, sticky="w")
+        ctk.CTkLabel(
+            llmnr_row,
+            text="Answers Windows multicast/broadcast name queries with our "
+                 "IP (RFC 4795 + RFC 1002)",
+            font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
+        ).grid(row=1, column=1, sticky="w", pady=(0, 6))
+
+        # ── NTP Spoofer toggle + offset input ─────────────────────────
+        ntp_row = ctk.CTkFrame(comp, fg_color="transparent")
+        ntp_row.grid(row=7, column=0, sticky="ew", padx=18, pady=(6, 4))
+        ntp_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkCheckBox(
+            ntp_row, text="", variable=self._opt_ntp_spoof,
+            checkbox_width=18, checkbox_height=18,
+            fg_color=_CLR_ACCENT,
+            hover_color=_shade(_CLR_ACCENT, 0.85),
+            border_color=_CLR_BORDER, width=24,
+        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+        ctk.CTkLabel(
+            ntp_row, text="🕓   NTP Spoofer",
+            font=_FONT_NAME, text_color=_CLR_TEXT, anchor="w",
+        ).grid(row=0, column=1, sticky="w")
+        ctk.CTkLabel(
+            ntp_row,
+            text="Skews the victim's clock by the offset below — useful for "
+                 "demonstrating time-based attacks against TLS / Kerberos",
+            font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
+        ).grid(row=1, column=1, sticky="w", pady=(0, 6))
+
+        ntp_input = ctk.CTkFrame(comp, fg_color=_CLR_SIDEBAR,
+                                  corner_radius=10, border_width=1,
+                                  border_color=_CLR_BORDER)
+        ntp_input.grid(row=8, column=0, sticky="ew", padx=18, pady=(0, 10))
+        ntp_input.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            ntp_input, text="OFFSET (seconds)",
+            font=(_SF, 9, "bold"), text_color=_CLR_MUTED,
+        ).grid(row=0, column=0, padx=(14, 10), pady=10)
+        ctk.CTkEntry(
+            ntp_input, textvariable=self._ntp_offset_var, height=30,
+            placeholder_text="e.g. 3600 = +1h, -86400 = -1 day",
+            font=_FONT_MONO,
+            fg_color=_CLR_BG, border_color=_CLR_BORDER, border_width=1,
+        ).grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=10)
+
+        # ── PCAP Recorder toggle + output path ────────────────────────
+        pcap_row = ctk.CTkFrame(comp, fg_color="transparent")
+        pcap_row.grid(row=9, column=0, sticky="ew", padx=18, pady=(6, 4))
+        pcap_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkCheckBox(
+            pcap_row, text="", variable=self._opt_pcap,
+            checkbox_width=18, checkbox_height=18,
+            fg_color=_CLR_ACCENT,
+            hover_color=_shade(_CLR_ACCENT, 0.85),
+            border_color=_CLR_BORDER, width=24,
+        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+        ctk.CTkLabel(
+            pcap_row, text="💾   PCAP Recorder",
+            font=_FONT_NAME, text_color=_CLR_TEXT, anchor="w",
+        ).grid(row=0, column=1, sticky="w")
+        ctk.CTkLabel(
+            pcap_row,
+            text="Save all MITM'd traffic to a Wireshark-readable .pcap file",
+            font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
+        ).grid(row=1, column=1, sticky="w", pady=(0, 6))
+
+        pcap_input = ctk.CTkFrame(comp, fg_color=_CLR_SIDEBAR,
+                                   corner_radius=10, border_width=1,
+                                   border_color=_CLR_BORDER)
+        pcap_input.grid(row=10, column=0, sticky="ew", padx=18, pady=(0, 14))
+        pcap_input.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            pcap_input, text="OUTPUT FILE",
+            font=(_SF, 9, "bold"), text_color=_CLR_MUTED,
+        ).grid(row=0, column=0, padx=(14, 10), pady=10)
+        ctk.CTkEntry(
+            pcap_input, textvariable=self._pcap_path_var, height=30,
+            placeholder_text="~/wifi-killer-session.pcap",
+            font=_FONT_MONO,
+            fg_color=_CLR_BG, border_color=_CLR_BORDER, border_width=1,
+        ).grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=10)
+        _ghost_button(
+            pcap_input, text="📁   Browse…", width=110, height=30,
+            command=self._pick_pcap_path, font=_FONT_SMALL,
+        ).grid(row=0, column=2, padx=(0, 14), pady=10)
+
         # ── Status card ───────────────────────────────────────────────
         status_card = ctk.CTkFrame(
             self, fg_color=_CLR_PANEL, corner_radius=14,
@@ -2582,6 +2696,21 @@ class AttackFrame(ctk.CTkFrame):
                 continue
             out.append((p, q))
         return out
+
+    def _pick_pcap_path(self) -> None:
+        """Open a save-as dialog and store the chosen path in the entry."""
+        path = filedialog.asksaveasfilename(
+            title="Save PCAP capture to…",
+            defaultextension=".pcap",
+            initialfile=os.path.basename(self._pcap_path_var.get())
+                        or "wifi-killer-session.pcap",
+            initialdir=os.path.dirname(self._pcap_path_var.get())
+                        or os.path.expanduser("~"),
+            filetypes=[("PCAP capture", "*.pcap"),
+                       ("All files", "*.*")],
+        )
+        if path:
+            self._pcap_path_var.set(path)
 
     # ------------------------------------------------------------------ #
     # Target list population & filtering                                   #
@@ -2920,6 +3049,34 @@ class AttackFrame(ctk.CTkFrame):
                     "Connection Killer enabled but no valid rules — skipping.",
                     "warn",
                 )
+        if self._opt_llmnr.get():
+            own_ip = self._app._get_own_ip()
+            if own_ip and own_ip not in ("?", ""):
+                self._start_llmnr_poisoner(own_ip)
+            else:
+                self._app.log(
+                    "LLMNR/NBT-NS Responder skipped — local IP unknown.",
+                    "warn",
+                )
+        if self._opt_ntp_spoof.get():
+            try:
+                offset = float(self._ntp_offset_var.get().strip() or "0")
+            except ValueError:
+                offset = None
+            if offset is None:
+                self._app.log(
+                    "NTP Spoofer skipped — offset must be a number.", "warn",
+                )
+            elif attacked_ips:
+                self._start_ntp_spoofer(offset, attacked_ips)
+        if self._opt_pcap.get():
+            path = self._pcap_path_var.get().strip()
+            if path and attacked_ips:
+                self._start_pcap_recorder(path, attacked_ips)
+            elif not path:
+                self._app.log(
+                    "PCAP Recorder skipped — no output path set.", "warn",
+                )
         # Tell the network map to repaint with attack styling now that
         # ``app.get_attack_info()`` will return a live snapshot.
         self._app.mark_attack_changed()
@@ -2988,6 +3145,56 @@ class AttackFrame(ctk.CTkFrame):
             self._conn_killer = None
             self._app.log(f"Connection Killer failed: {exc}", "err")
 
+    def _start_llmnr_poisoner(self, answer_ip: str) -> None:
+        try:
+            from wifi_killer.modules.llmnr_poisoner import LLMNRNBNSPoisoner
+            # Avoid hijacking queries for our own hostname.
+            own_name = socket.gethostname().split(".")[0]
+            self._llmnr_poisoner = LLMNRNBNSPoisoner(
+                self._app._iface, answer_ip, exclude_names={own_name},
+            )
+            self._llmnr_poisoner.start()
+            self._app.log(
+                f"LLMNR / NBT-NS Responder running → answering as {answer_ip}",
+                "warn",
+            )
+        except Exception as exc:
+            self._llmnr_poisoner = None
+            self._app.log(f"LLMNR Responder failed: {exc}", "err")
+
+    def _start_ntp_spoofer(
+        self, offset: float, attacked_ips: list[str],
+    ) -> None:
+        try:
+            from wifi_killer.modules.ntp_spoofer import NTPSpoofer
+            self._ntp_spoofer = NTPSpoofer(
+                self._app._iface, offset, attacked_ips,
+            )
+            self._ntp_spoofer.start()
+            sign = "+" if offset >= 0 else ""
+            self._app.log(
+                f"NTP Spoofer running — offset {sign}{offset:.0f}s on "
+                f"{len(attacked_ips)} target(s)",
+                "warn",
+            )
+        except Exception as exc:
+            self._ntp_spoofer = None
+            self._app.log(f"NTP Spoofer failed: {exc}", "err")
+
+    def _start_pcap_recorder(
+        self, path: str, attacked_ips: list[str],
+    ) -> None:
+        try:
+            from wifi_killer.modules.pcap_recorder import PCAPRecorder
+            self._pcap_recorder = PCAPRecorder(
+                self._app._iface, attacked_ips, path,
+            )
+            self._pcap_recorder.start()
+            self._app.log(f"PCAP Recorder writing to {path}", "ok")
+        except Exception as exc:
+            self._pcap_recorder = None
+            self._app.log(f"PCAP Recorder failed: {exc}", "err")
+
     def _stop_attack(self) -> None:
         if not self._running:
             return
@@ -3023,6 +3230,42 @@ class AttackFrame(ctk.CTkFrame):
             except Exception:
                 pass
             self._conn_killer = None
+        if self._llmnr_poisoner is not None:
+            try:
+                hits = self._llmnr_poisoner.hits
+                self._llmnr_poisoner.stop()
+                self._app.log(
+                    f"LLMNR Responder stopped — {hits} name query/queries poisoned.",
+                    "ok",
+                )
+            except Exception:
+                pass
+            self._llmnr_poisoner = None
+        if self._ntp_spoofer is not None:
+            try:
+                hits = self._ntp_spoofer.hits
+                self._ntp_spoofer.stop()
+                self._app.log(
+                    f"NTP Spoofer stopped — {hits} forged reply/replies sent.",
+                    "ok",
+                )
+            except Exception:
+                pass
+            self._ntp_spoofer = None
+        if self._pcap_recorder is not None:
+            try:
+                snap = self._pcap_recorder.snapshot()
+                self._pcap_recorder.stop()
+                self._app.log(
+                    f"PCAP Recorder stopped — wrote "
+                    f"{snap['packets_written']:,} packet(s) "
+                    f"({snap['bytes_written']/1024:.1f} KB) to "
+                    f"{snap['output']}",
+                    "ok",
+                )
+            except Exception:
+                pass
+            self._pcap_recorder = None
         self._running = False
         self._start_btn.configure(state="normal", text="⚡   Launch Attack")
         self._stop_btn.configure(state="disabled")
@@ -3131,6 +3374,22 @@ class AttackFrame(ctk.CTkFrame):
             bits.append(
                 f"🔪 Conn Killer: {snap['kills']} reset "
                 f"({len(snap['rules'])} rule(s))"
+            )
+        if self._llmnr_poisoner is not None:
+            snap = self._llmnr_poisoner.snapshot()
+            bits.append(f"🕷 LLMNR/NBNS: {snap['hits']} poisoned")
+        if self._ntp_spoofer is not None:
+            snap = self._ntp_spoofer.snapshot()
+            sign = "+" if snap["offset"] >= 0 else ""
+            bits.append(
+                f"🕓 NTP: {snap['hits']} forged "
+                f"(offset {sign}{snap['offset']:.0f}s)"
+            )
+        if self._pcap_recorder is not None:
+            snap = self._pcap_recorder.snapshot()
+            kb = snap["bytes_written"] / 1024
+            bits.append(
+                f"💾 PCAP: {snap['packets_written']:,} pkt · {kb:.0f} KB"
             )
         self._companion_label.configure(text="    ·    ".join(bits))
 
@@ -5356,37 +5615,40 @@ class WolFrame(ctk.CTkFrame):
         self._send_btn.grid(row=5, column=0, columnspan=2,
                             padx=18, pady=(12, 18), sticky="ew")
 
-        # ── Tip from selected host ─────────────────────────────────────
+        # ── Pick from scanned hosts ────────────────────────────────────
         tip = ctk.CTkFrame(body, fg_color=_CLR_SIDEBAR, corner_radius=14)
-        tip.grid(row=0, column=1, sticky="new", padx=(0, 0), pady=(8, 0))
+        tip.grid(row=0, column=1, sticky="nsew", padx=(0, 0), pady=(8, 0))
         tip.grid_columnconfigure(0, weight=1)
+        tip.grid_rowconfigure(2, weight=1)
 
-        ctk.CTkLabel(tip, text="Fill from Scan",
-                     font=_FONT_HEAD, text_color=_CLR_TEXT).pack(
-            padx=16, pady=(16, 6), anchor="w")
+        pick_hdr = ctk.CTkFrame(tip, fg_color="transparent")
+        pick_hdr.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 4))
+        pick_hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(pick_hdr, text="Pick from Scan",
+                     font=_FONT_HEAD, text_color=_CLR_TEXT,
+                     anchor="w").grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            pick_hdr, text="🔄  Refresh", width=92, height=26,
+            fg_color=_CLR_PANEL, hover_color=_CLR_HOVER,
+            border_width=1, border_color=_CLR_BORDER,
+            text_color=_CLR_TEXT, font=_FONT_SMALL,
+            command=self._refresh_pick_list,
+        ).grid(row=0, column=1, sticky="e")
+
         ctk.CTkLabel(
             tip,
-            text=(
-                "Select a host in the Scan frame, then click\n"
-                "the WoL shortcut in the detail popup to pre-fill\n"
-                "the MAC address here automatically."
-            ),
-            font=_FONT_LABEL, text_color=_CLR_MUTED, justify="left",
-        ).pack(padx=16, pady=(0, 8), anchor="w")
+            text="Click a host to prefill its MAC address.",
+            font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
+        ).grid(row=1, column=0, sticky="w", padx=14, pady=(0, 4))
 
-        ctk.CTkLabel(tip, text="How WoL Works",
-                     font=_FONT_HEAD, text_color=_CLR_TEXT).pack(
-            padx=16, pady=(8, 4), anchor="w")
-        ctk.CTkLabel(
-            tip,
-            text=(
-                "1. The target device must have WoL enabled in BIOS/UEFI.\n"
-                "2. The NIC must remain powered (stand-by / hibernate is OK).\n"
-                "3. Broadcasts cross subnets only if your router forwards them.\n"
-                "4. Use the subnet broadcast (e.g. 192.168.1.255) for reliability."
-            ),
-            font=_FONT_SMALL, text_color=_CLR_MUTED, justify="left",
-        ).pack(padx=16, pady=(0, 16), anchor="w")
+        self._pick_scroll = ctk.CTkScrollableFrame(
+            tip, fg_color="transparent", corner_radius=0,
+        )
+        self._pick_scroll.grid(row=2, column=0, sticky="nsew",
+                                padx=8, pady=(0, 12))
+        self._pick_scroll.grid_columnconfigure(0, weight=1)
+        # Populate after construction so app._hosts may have been filled.
+        self.after(50, self._refresh_pick_list)
 
         # ── History log ───────────────────────────────────────────────
         log_frame = ctk.CTkFrame(body, fg_color=_CLR_SIDEBAR, corner_radius=14)
@@ -5422,6 +5684,71 @@ class WolFrame(ctk.CTkFrame):
         """Pre-fill the MAC entry from an external caller (e.g. host detail dialog)."""
         self._mac_entry.delete(0, "end")
         self._mac_entry.insert(0, mac)
+
+    def _on_show(self) -> None:
+        """Re-populate the host picker each time the tab is opened."""
+        self._refresh_pick_list()
+
+    def _refresh_pick_list(self) -> None:
+        """Rebuild the pick-from-scan list from the app's host registry."""
+        for w in self._pick_scroll.winfo_children():
+            w.destroy()
+
+        hosts = sorted(
+            (h for h in self._app._hosts if h.get("mac")),
+            key=lambda h: _ip_sort_key(h.get("ip", "")),
+        )
+        if not hosts:
+            ctk.CTkLabel(
+                self._pick_scroll,
+                text="No hosts with MACs yet — run a scan first.",
+                font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
+            ).pack(padx=12, pady=10, anchor="w", fill="x")
+            return
+
+        for idx, host in enumerate(hosts):
+            bg = _CLR_ROW_ODD if idx % 2 == 0 else _CLR_ROW_EVEN
+            row = ctk.CTkFrame(self._pick_scroll, fg_color=bg,
+                               corner_radius=8)
+            row.pack(fill="x", padx=4, pady=1)
+
+            inner = ctk.CTkButton(
+                row, text="", fg_color="transparent",
+                hover_color=_CLR_HOVER, anchor="w",
+                command=lambda h=host: self._apply_picked_host(h),
+                corner_radius=8, height=44,
+            )
+            inner.pack(fill="x", padx=4, pady=2)
+
+            label_col = ctk.CTkFrame(inner, fg_color="transparent")
+            label_col.place(relx=0.0, rely=0.5, anchor="w", x=10)
+
+            ctk.CTkLabel(
+                label_col,
+                text=f"{host.get('icon', '🔌')}  "
+                     f"{host.get('hostname') or host.get('ip', '?')}",
+                font=_FONT_NAME, text_color=_CLR_TEXT, anchor="w",
+            ).pack(anchor="w")
+            ctk.CTkLabel(
+                label_col,
+                text=f"{host.get('ip', '')}  ·  {host.get('mac', '')}",
+                font=_FONT_MONO, text_color=_CLR_MUTED, anchor="w",
+            ).pack(anchor="w")
+
+    def _apply_picked_host(self, host: dict) -> None:
+        """Prefill MAC + broadcast from a clicked scanned host."""
+        mac = host.get("mac") or ""
+        if mac:
+            self.prefill_mac(mac.upper())
+        # Use the host's /24 broadcast if possible — more reliable than
+        # 255.255.255.255 since some routers don't forward limited bcasts.
+        ip = host.get("ip") or ""
+        if ip and ip.count(".") == 3:
+            parts = ip.split(".")
+            if parts[-1] != "255":
+                bcast = ".".join(parts[:3] + ["255"])
+                self._bcast_entry.delete(0, "end")
+                self._bcast_entry.insert(0, bcast)
 
     def _send_wol(self) -> None:
         from wifi_killer.modules.wol import send_wol

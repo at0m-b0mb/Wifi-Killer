@@ -2050,6 +2050,154 @@ class _HostDetailDialog(ctk.CTkToplevel):
 
 
 # ===========================================================================
+# Service-probe results dialog
+# ===========================================================================
+
+class _ServiceProbeDialog(ctk.CTkToplevel):
+    """Modal-ish window that runs a service-probe sweep and streams results."""
+
+    def __init__(self, parent: "AttackFrame", ips: list[str]) -> None:
+        super().__init__(parent)
+        self._parent_frame = parent
+        self._ips = list(ips)
+        self._prober = None
+        self.title("Service Probe Results")
+        self.geometry("820x560")
+        self.minsize(640, 420)
+        self.configure(fg_color=_CLR_BG)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._build()
+
+    # ------------------------------------------------------------------ #
+
+    def _build(self) -> None:
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        # Header
+        hdr = _page_header(
+            self, icon="🔬", title="Service Probe",
+            subtitle=f"Banner-grabbing {len(self._ips)} host(s) on common ports",
+        )
+        hdr.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 6))
+
+        self._status_lbl = ctk.CTkLabel(
+            hdr.right_slot, text="Probing…",
+            font=(_SF, 11, "bold"), text_color=_CLR_WARNING,
+        )
+        self._status_lbl.pack(side="right", padx=(0, 2))
+
+        # Scrollable result list
+        self._scroll = ctk.CTkScrollableFrame(
+            self, fg_color=_CLR_PANEL, corner_radius=12,
+            border_width=1, border_color=_CLR_BORDER,
+        )
+        self._scroll.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 8))
+        self._scroll.grid_columnconfigure(0, weight=1)
+        self._host_cards: dict[str, dict] = {}
+
+        # Bottom button row
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 14))
+        btn_row.grid_columnconfigure(0, weight=1)
+        self._close_btn = _ghost_button(
+            btn_row, text="Cancel sweep",
+            command=self._on_close, width=140, height=32,
+        )
+        self._close_btn.grid(row=0, column=1, sticky="e")
+
+        # Pre-create one card per host so users see progress per row.
+        for ip in self._ips:
+            self._make_host_card(ip)
+
+    def _make_host_card(self, ip: str) -> None:
+        card = ctk.CTkFrame(
+            self._scroll, fg_color=_CLR_SIDEBAR, corner_radius=10,
+            border_width=1, border_color=_CLR_BORDER,
+        )
+        card.pack(fill="x", padx=4, pady=4)
+        title = ctk.CTkLabel(
+            card, text=f"⏳   {ip}",
+            font=_FONT_NAME, text_color=_CLR_MUTED, anchor="w",
+        )
+        title.pack(fill="x", padx=14, pady=(10, 0), anchor="w")
+        body = ctk.CTkLabel(
+            card, text="Probing…",
+            font=_FONT_MONO, text_color=_CLR_MUTED,
+            anchor="w", justify="left",
+        )
+        body.pack(fill="x", padx=14, pady=(2, 10), anchor="w")
+        self._host_cards[ip] = {"title": title, "body": body}
+
+    # ------------------------------------------------------------------ #
+
+    def start_probe(self) -> None:
+        from wifi_killer.modules.service_probe import ServiceProber
+        self._prober = ServiceProber(
+            self._ips,
+            on_host_done=lambda r: self.after(0, self._on_host_done, r),
+        )
+        self._prober.start()
+
+    def _on_host_done(self, result) -> None:
+        card = self._host_cards.get(result.ip)
+        if not card:
+            return
+        ms = int(result.duration_ms)
+        if result.error:
+            card["title"].configure(
+                text=f"✕   {result.ip}    {ms} ms",
+                text_color=_CLR_DANGER,
+            )
+            card["body"].configure(
+                text=f"Error: {result.error}",
+                text_color=_CLR_DANGER,
+            )
+        elif not result.findings:
+            card["title"].configure(
+                text=f"○   {result.ip}    {ms} ms",
+                text_color=_CLR_MUTED,
+            )
+            card["body"].configure(
+                text="No common ports answered.",
+                text_color=_CLR_MUTED,
+            )
+        else:
+            card["title"].configure(
+                text=f"✓   {result.ip}    "
+                     f"{len(result.findings)} open    {ms} ms",
+                text_color=_CLR_SUCCESS,
+            )
+            lines = []
+            for f in result.findings:
+                line = f"  {f.port:>5}/tcp   {f.service}"
+                if f.version:
+                    line += f"   →  {f.version}"
+                elif f.banner:
+                    line += f"   →  {f.banner}"
+                lines.append(line)
+            card["body"].configure(
+                text="\n".join(lines), text_color=_CLR_TEXT,
+            )
+        # All done?
+        snap = self._prober.snapshot() if self._prober else None
+        if snap and len(snap["results"]) >= len(self._ips):
+            self._status_lbl.configure(
+                text=f"Done — {len(self._ips)} hosts probed",
+                text_color=_CLR_SUCCESS,
+            )
+            self._close_btn.configure(text="Close")
+
+    def _on_close(self) -> None:
+        if self._prober is not None:
+            try:
+                self._prober.stop()
+            except Exception:
+                pass
+        self.destroy()
+
+
+# ===========================================================================
 # Attack Frame
 # ===========================================================================
 
@@ -2073,6 +2221,7 @@ class AttackFrame(ctk.CTkFrame):
         self._ntp_spoofer = None
         self._pcap_recorder = None
         self._dhcp_spoofer = None
+        self._wpad_server = None
         # Live activity badges on each target row (keyed by victim IP).
         # Populated only while the MITM Inspector is running.
         self._row_activity_labels: dict[str, ctk.CTkLabel] = {}
@@ -2089,6 +2238,7 @@ class AttackFrame(ctk.CTkFrame):
         self._opt_ntp_spoof = tk.BooleanVar(value=False)
         self._opt_pcap = tk.BooleanVar(value=False)
         self._opt_dhcp = tk.BooleanVar(value=False)
+        self._opt_wpad = tk.BooleanVar(value=False)
         # Inputs for the new modules.
         self._mdns_pattern_var = tk.StringVar(value="*")  # all .local by default
         self._ntp_offset_var = tk.StringVar(value="3600")  # +1h default
@@ -2314,6 +2464,13 @@ class AttackFrame(ctk.CTkFrame):
                 width=0, height=28, font=_FONT_SMALL,
             ).pack(side="left", padx=(0, 6))
 
+        # Active-recon action: banner-grab the selected hosts.
+        _secondary_button(
+            chip_row, text="🔬   Probe Services",
+            command=self._probe_selected_services,
+            height=28, width=140, font=_FONT_SMALL,
+        ).pack(side="right", padx=(0, 4))
+
         # Scrollable list of hosts — given a dedicated grid row that grows.
         # Move the chip row up to row=1.5 by inserting another grid row.
         parent.grid_rowconfigure(3, weight=1)
@@ -2460,6 +2617,17 @@ class AttackFrame(ctk.CTkFrame):
             self._opt_dhcp, row=7,
         )
 
+        # 9) WPAD Server — serve /wpad.dat with a PAC config. Best paired
+        #    with the LLMNR / NBT-NS / mDNS / DNS spoofers above so victims
+        #    resolve "wpad" to our IP and then fetch the PAC from us.
+        card(
+            "🕸️", "WPAD Server (PAC injector)",
+            "Tiny HTTP server on port 80 that serves wpad.dat — a "
+            "Proxy Auto-Config pointing at our IP. Combine with the "
+            "name-poisoning spoofers above for the full WPAD chain.",
+            self._opt_wpad, row=8,
+        )
+
     def _build_rule_subcard(
         self, parent, title: str, add_cb, holder_attr: str,
     ) -> None:
@@ -2577,6 +2745,35 @@ class AttackFrame(ctk.CTkFrame):
         self._companion_label.grid(row=3, column=0, padx=18, pady=(0, 12),
                                     sticky="w")
 
+        # ── Live Activity Feed ───────────────────────────────────────
+        # Unified scrolling log of recent events from every active
+        # companion module — DNS queries inspected, names poisoned,
+        # connections killed, etc. Refreshed by ``_tick`` once a second.
+        feed_card = ctk.CTkFrame(
+            parent, fg_color=_CLR_SIDEBAR, corner_radius=12,
+            border_width=1, border_color=_CLR_BORDER,
+        )
+        feed_card.grid(row=2, column=0, sticky="nsew", padx=8, pady=(8, 4))
+        feed_card.grid_rowconfigure(1, weight=1)
+        feed_card.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(2, weight=1)
+        ctk.CTkLabel(
+            feed_card, text="LIVE ACTIVITY FEED",
+            font=(_SF, 9, "bold"), text_color=_CLR_MUTED, anchor="w",
+        ).grid(row=0, column=0, padx=18, pady=(12, 4), sticky="w")
+        self._feed_box = ctk.CTkTextbox(
+            feed_card, fg_color=_CLR_BG,
+            font=_FONT_MONO, text_color=_CLR_TEXT,
+            border_width=1, border_color=_CLR_BORDER,
+            corner_radius=10, height=180,
+        )
+        self._feed_box.grid(row=1, column=0, sticky="nsew",
+                             padx=14, pady=(0, 14))
+        self._feed_box.configure(state="disabled")
+        # Track the last-seen event timestamp per module so we only
+        # append the events newer than what's already on screen.
+        self._feed_seen_ts: dict[str, float] = {}
+
     # ------------------------------------------------------------------ #
     # DNS spoof rules                                                      #
     # ------------------------------------------------------------------ #
@@ -2691,6 +2888,34 @@ class AttackFrame(ctk.CTkFrame):
                 continue
             out.append((p, q))
         return out
+
+    # ------------------------------------------------------------------ #
+    # Service-probe action                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _probe_selected_services(self) -> None:
+        """Banner-grab common ports on every currently-selected host."""
+        selected = [
+            ip for ip, var in self._selection.items() if var.get()
+        ]
+        if not selected:
+            messagebox.showinfo(
+                "No targets",
+                "Select at least one host in the list, then click "
+                "“🔬 Probe Services” again.",
+            )
+            return
+        if len(selected) > 64:
+            if not messagebox.askyesno(
+                "Large sweep",
+                f"You've selected {len(selected)} hosts. Probing this "
+                "many at once will take longer and generate a lot of "
+                "TCP connections. Continue?",
+            ):
+                return
+
+        dlg = _ServiceProbeDialog(self, selected)
+        dlg.start_probe()
 
     def _pick_pcap_path(self) -> None:
         """Open a save-as dialog and store the chosen path in the entry."""
@@ -3084,6 +3309,8 @@ class AttackFrame(ctk.CTkFrame):
                 )
         if self._opt_dhcp.get():
             self._start_dhcp_spoofer()
+        if self._opt_wpad.get():
+            self._start_wpad_server()
         # Tell the network map to repaint with attack styling now that
         # ``app.get_attack_info()`` will return a live snapshot.
         self._app.mark_attack_changed()
@@ -3222,6 +3449,27 @@ class AttackFrame(ctk.CTkFrame):
             self._pcap_recorder = None
             self._app.log(f"PCAP Recorder failed: {exc}", "err")
 
+    def _start_wpad_server(self) -> None:
+        """Spin up the WPAD HTTP server on port 80."""
+        try:
+            from wifi_killer.modules.wpad_server import WPADServer
+            own_ip = self._app._get_own_ip()
+            if not own_ip or own_ip in ("?", ""):
+                raise RuntimeError("Local IP unknown — pick an interface first.")
+            self._wpad_server = WPADServer(
+                bind_ip="0.0.0.0", port=80,
+                proxy_ip=own_ip, proxy_port=8080,
+            )
+            self._wpad_server.start()
+            self._app.log(
+                f"WPAD Server running on http://{own_ip}/wpad.dat — "
+                f"PAC points to {own_ip}:8080",
+                "warn",
+            )
+        except Exception as exc:
+            self._wpad_server = None
+            self._app.log(f"WPAD Server failed: {exc}", "err")
+
     def _start_dhcp_spoofer(self) -> None:
         """Start a rogue DHCP responder that hands out our IP as DNS/gateway."""
         try:
@@ -3344,6 +3592,17 @@ class AttackFrame(ctk.CTkFrame):
             except Exception:
                 pass
             self._dhcp_spoofer = None
+        if self._wpad_server is not None:
+            try:
+                hits = self._wpad_server.hits
+                self._wpad_server.stop()
+                self._app.log(
+                    f"WPAD Server stopped — served {hits} PAC request(s).",
+                    "ok",
+                )
+            except Exception:
+                pass
+            self._wpad_server = None
         self._running = False
         self._start_btn.configure(state="normal", text="⚡   Launch Attack")
         self._stop_btn.configure(state="disabled")
@@ -3367,7 +3626,112 @@ class AttackFrame(ctk.CTkFrame):
 
     def _start_counter(self) -> None:
         self._counter_start = time.time()
+        # Reset per-module event cursors so the feed starts fresh.
+        self._feed_seen_ts = {}
+        if getattr(self, "_feed_box", None) is not None:
+            self._feed_box.configure(state="normal")
+            self._feed_box.delete("1.0", "end")
+            self._feed_box.configure(state="disabled")
         self._tick()
+
+    def _refresh_activity_feed(self) -> None:
+        """Append any new events from every active module to the feed box."""
+        feed = getattr(self, "_feed_box", None)
+        if feed is None:
+            return
+        # Collect new events from each module — each event becomes one line.
+        new_lines: list[tuple[float, str]] = []
+
+        def _harvest(module_key: str, events: list[dict], formatter) -> None:
+            if not events:
+                return
+            last = self._feed_seen_ts.get(module_key, 0.0)
+            cur_max = last
+            for ev in events:
+                ts = float(ev.get("ts") or 0.0)
+                if ts <= last:
+                    continue
+                cur_max = max(cur_max, ts)
+                try:
+                    line = formatter(ev)
+                except Exception:
+                    continue
+                if line:
+                    new_lines.append((ts, line))
+            self._feed_seen_ts[module_key] = cur_max
+
+        # MITM Inspector — DNS, SNI, HTTP, cred events
+        if self._mitm_inspector is not None:
+            snap = self._mitm_inspector.snapshot()
+            kind_icon = {
+                "dns":  "🔍 DNS ",
+                "sni":  "🔒 SNI ",
+                "http": "🌐 HTTP",
+                "cred": "🔑 CRED",
+            }
+            _harvest(
+                "inspect", snap.get("events", []),
+                lambda e: f"{kind_icon.get(e['kind'], '·')}  "
+                          f"{e.get('target','?'):<15}  {e.get('value','')[:80]}",
+            )
+        if self._dns_spoofer is not None:
+            _harvest(
+                "dns_spoof", self._dns_spoofer.snapshot().get("recent_hits", []),
+                lambda e: f"🎯 DNS-SPOOF  {e['victim']:<15}  "
+                          f"{e['domain']} → {e['spoof_ip']}",
+            )
+        if self._conn_killer is not None:
+            _harvest(
+                "kill", self._conn_killer.snapshot().get("recent_kills", []),
+                lambda e: f"🔪 RESET     {e['victim']:<15}  "
+                          f"{e.get('hostname') or e['peer']}:{e['peer_port']}",
+            )
+        if self._llmnr_poisoner is not None:
+            _harvest(
+                "llmnr", self._llmnr_poisoner.snapshot().get("recent_hits", []),
+                lambda e: f"🕷 {e.get('proto','LLMNR'):<6}  "
+                          f"{e['victim']:<15}  asked '{e['name']}' → us",
+            )
+        if self._mdns_spoofer is not None:
+            _harvest(
+                "mdns", self._mdns_spoofer.snapshot().get("recent_hits", []),
+                lambda e: f"🍏 mDNS    {e['victim']:<15}  '{e['name']}' → us",
+            )
+        if self._ntp_spoofer is not None:
+            _harvest(
+                "ntp", self._ntp_spoofer.snapshot().get("recent_hits", []),
+                lambda e: f"🕓 NTP     {e['victim']:<15}  offset "
+                          f"{'+' if e['offset']>=0 else ''}{int(e['offset'])}s",
+            )
+        if self._dhcp_spoofer is not None:
+            _harvest(
+                "dhcp", self._dhcp_spoofer.snapshot().get("recent_hits", []),
+                lambda e: f"📡 DHCP-{e['kind']:<5}  {e['client']}  → "
+                          f"{e['offered']}  (DNS {e['dns']}, GW {e['gateway']})",
+            )
+        if self._wpad_server is not None:
+            _harvest(
+                "wpad", self._wpad_server.snapshot().get("recent_hits", []),
+                lambda e: f"🕸️ WPAD-GET {e['client']:<15}  {e.get('path','/')}  "
+                          f"({e.get('ua','')[:40]})",
+            )
+
+        if not new_lines:
+            return
+        new_lines.sort(key=lambda p: p[0])
+        feed.configure(state="normal")
+        for ts, line in new_lines[-100:]:   # cap one tick at 100 inserts
+            stamp = time.strftime("%H:%M:%S", time.localtime(ts))
+            feed.insert("end", f"{stamp}  {line}\n")
+        # Trim the buffer to the most-recent ~500 lines so it doesn't grow forever.
+        try:
+            line_count = int(feed.index("end-1c").split(".")[0])
+            if line_count > 500:
+                feed.delete("1.0", f"{line_count - 500}.0")
+        except Exception:
+            pass
+        feed.see("end")
+        feed.configure(state="disabled")
 
     def _tick(self) -> None:
         if not self._running:
@@ -3490,6 +3854,11 @@ class AttackFrame(ctk.CTkFrame):
         if self._dhcp_spoofer is not None:
             snap = self._dhcp_spoofer.snapshot()
             bits.append(f"📡 DHCP: {snap['hits']} offers")
+        if self._wpad_server is not None:
+            snap = self._wpad_server.snapshot()
+            bits.append(f"🕸️ WPAD: {snap['hits']} fetches")
+        # Push fresh activity into the unified feed.
+        self._refresh_activity_feed()
         self._companion_label.configure(text="    ·    ".join(bits))
 
         self._timer_id = self.after(1000, self._tick)
@@ -5249,32 +5618,65 @@ class ThrottleFrame(ctk.CTkFrame):
             subtitle="Rate-limit a victim's download / upload via Linux tc HTB (requires an active MITM)",
         ).grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 12))
 
-        # ── Target selector card ──────────────────────────────────────
-        sel_card = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
-        sel_card.grid(row=2, column=0, sticky="ew", padx=28, pady=(0, 12))
-        sel_card.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(sel_card, text="Target IP:", font=_FONT_LABEL,
-                     text_color=_CLR_MUTED).grid(row=0, column=0, padx=16, pady=(14, 10), sticky="w")
-
-        self._target_var = tk.StringVar()
-        self._target_combo = ctk.CTkComboBox(
-            sel_card, variable=self._target_var, values=[],
-            width=200, font=_FONT_MONO,
-            command=lambda _: None,
+        # ── Target picker card — scrollable list of scanned hosts ─────
+        sel_card = ctk.CTkFrame(
+            self, fg_color=_CLR_PANEL, corner_radius=14,
+            border_width=1, border_color=_CLR_BORDER,
         )
-        self._target_combo.grid(row=0, column=1, padx=(0, 8), pady=(14, 10), sticky="w")
+        sel_card.grid(row=2, column=0, sticky="ew", padx=28, pady=(0, 12))
+        sel_card.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkButton(
-            sel_card, text="🔄 Refresh", width=100, height=30,
-            fg_color=_CLR_PANEL, font=_FONT_SMALL,
+        title_row = ctk.CTkFrame(sel_card, fg_color="transparent")
+        title_row.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 4))
+        title_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            title_row, text="Pick a victim",
+            font=_FONT_HEAD, text_color=_CLR_TEXT, anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        self._target_summary_lbl = ctk.CTkLabel(
+            title_row, text="No victim selected",
+            font=(_SF, 10, "bold"), text_color=_CLR_MUTED, anchor="e",
+        )
+        self._target_summary_lbl.grid(row=0, column=1, sticky="e")
+        _ghost_button(
+            title_row, text="🔄  Refresh", width=100, height=28,
+            font=_FONT_SMALL,
             command=self._refresh_targets,
-        ).grid(row=0, column=2, padx=(0, 8), pady=(14, 10))
+        ).grid(row=0, column=2, padx=(8, 0), sticky="e")
 
+        # Backing state (kept under the same attribute names the existing
+        # code paths use — single-select via StringVar, radio behaviour).
+        self._target_var = tk.StringVar()
+        self._target_var.trace_add("write", lambda *_: self._on_target_changed())
+
+        self._target_list = ctk.CTkScrollableFrame(
+            sel_card, fg_color=_CLR_BG, corner_radius=10,
+            height=150,
+        )
+        self._target_list.grid(row=1, column=0, sticky="ew",
+                                padx=8, pady=(0, 8))
+        self._target_list.grid_columnconfigure(0, weight=1)
+        self._target_row_widgets: dict[str, ctk.CTkFrame] = {}
+
+        # Manual-IP fallback for hosts that didn't appear in any scan.
+        manual_row = ctk.CTkFrame(sel_card, fg_color="transparent")
+        manual_row.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 12))
+        manual_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            manual_row, text="OR TYPE IP",
+            font=(_SF, 9, "bold"), text_color=_CLR_MUTED, anchor="w",
+        ).grid(row=0, column=0, padx=(0, 10), sticky="w")
         self._manual_entry = ctk.CTkEntry(
-            sel_card, width=160, font=_FONT_MONO,
-            placeholder_text="or type IP manually")
-        self._manual_entry.grid(row=0, column=3, padx=(0, 16), pady=(14, 10))
+            manual_row, height=32, font=_FONT_MONO,
+            placeholder_text="e.g. 10.0.0.55",
+            fg_color=_CLR_SIDEBAR, border_color=_CLR_BORDER, border_width=1,
+        )
+        self._manual_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        _ghost_button(
+            manual_row, text="Use this IP", width=100, height=32,
+            font=_FONT_SMALL,
+            command=self._use_manual_target,
+        ).grid(row=0, column=2)
 
         # ── Slider card ───────────────────────────────────────────────
         sliders_card = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
@@ -5416,22 +5818,115 @@ class ThrottleFrame(ctk.CTkFrame):
         self._on_slider(dl_mbps, "dl")
         self._on_slider(ul_mbps, "ul")
 
+    def _on_show(self) -> None:
+        """Refresh the picker each time the user switches to this tab."""
+        self._refresh_targets()
+
     def _refresh_targets(self) -> None:
-        ips = [h["ip"] for h in self._app._hosts]
-        self._target_combo.configure(values=ips)
-        if ips and not self._target_var.get():
-            self._target_var.set(ips[0])
+        """Rebuild the host-pick list from the app's host registry."""
+        for w in self._target_list.winfo_children():
+            w.destroy()
+        self._target_row_widgets.clear()
+
+        hosts = sorted(
+            (h for h in self._app._hosts if h.get("ip")),
+            key=lambda h: _ip_sort_key(h.get("ip", "")),
+        )
+        # Exclude this device and the gateway — neither is a useful throttle target.
+        own_ip = self._app._get_own_ip()
+        gateway = (self._app._gateway or "").strip()
+        hosts = [
+            h for h in hosts
+            if h.get("ip") not in (own_ip, gateway)
+        ]
+        if not hosts:
+            ctk.CTkLabel(
+                self._target_list,
+                text="No hosts available — run a scan first.",
+                font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
+            ).pack(padx=12, pady=10, anchor="w", fill="x")
+            return
+
+        for idx, host in enumerate(hosts):
+            ip = host["ip"]
+            bg = _CLR_ROW_ODD if idx % 2 == 0 else _CLR_ROW_EVEN
+            row = ctk.CTkFrame(self._target_list, fg_color=bg, corner_radius=8)
+            row.pack(fill="x", padx=4, pady=1)
+            row.grid_columnconfigure(1, weight=1)
+
+            ctk.CTkRadioButton(
+                row, text="", variable=self._target_var, value=ip,
+                radiobutton_width=18, radiobutton_height=18,
+                fg_color=_CLR_ACCENT,
+                hover_color=_shade(_CLR_ACCENT, 0.85),
+                border_color=_CLR_BORDER, width=24,
+            ).grid(row=0, column=0, padx=(10, 8), pady=8, sticky="w")
+
+            label_col = ctk.CTkFrame(row, fg_color="transparent")
+            label_col.grid(row=0, column=1, sticky="w", pady=4)
+            ctk.CTkLabel(
+                label_col,
+                text=f"{host.get('icon','🔌')}   "
+                     f"{host.get('hostname') or host.get('ip')}",
+                font=_FONT_NAME, text_color=_CLR_TEXT, anchor="w",
+            ).pack(anchor="w")
+            sub_bits = [host["ip"]]
+            v = host.get("vendor")
+            if v and v not in ("Unknown", ""):
+                sub_bits.append(v[:24])
+            t = host.get("type")
+            if t and t != "Unknown Device":
+                sub_bits.append(t)
+            ctk.CTkLabel(
+                label_col, text="  ·  ".join(sub_bits),
+                font=_FONT_SMALL, text_color=_CLR_MUTED, anchor="w",
+            ).pack(anchor="w")
+            self._target_row_widgets[ip] = row
+        self._on_target_changed()
+
+    def _on_target_changed(self) -> None:
+        """Update the summary chip when the radio selection changes."""
+        ip = self._target_var.get().strip()
+        if not ip:
+            self._target_summary_lbl.configure(
+                text="No victim selected", text_color=_CLR_MUTED,
+            )
+            return
+        # Try to enrich with the host's hostname for the summary.
+        match = next(
+            (h for h in self._app._hosts if h.get("ip") == ip), None,
+        )
+        label = (match.get("hostname") or ip) if match else ip
+        self._target_summary_lbl.configure(
+            text=f"Target: {label}", text_color=_CLR_TEXT,
+        )
+
+    def _use_manual_target(self) -> None:
+        """Adopt the typed-in IP as the active target."""
+        ip = self._manual_entry.get().strip()
+        if not _validate_ip(ip):
+            messagebox.showwarning(
+                "Invalid IP", f"'{ip}' is not a valid IPv4 address.",
+            )
+            return
+        self._target_var.set(ip)
 
     def prefill_target(self, ip: str) -> None:
-        """Pre-fill the manual target entry with *ip* (called from host row)."""
-        self._manual_entry.delete(0, "end")
-        self._manual_entry.insert(0, ip)
+        """Pre-fill the picker from an external caller (e.g. host detail dialog)."""
+        if any(h.get("ip") == ip for h in self._app._hosts):
+            self._target_var.set(ip)
+        else:
+            # Host isn't in the scan list — fall back to manual entry.
+            self._manual_entry.delete(0, "end")
+            self._manual_entry.insert(0, ip)
+            self._target_var.set(ip)
 
     def _resolve_target(self) -> Optional[str]:
+        chosen = self._target_var.get().strip()
+        if chosen:
+            return chosen
         manual = self._manual_entry.get().strip()
-        if manual:
-            return manual
-        return self._target_var.get().strip() or None
+        return manual or None
 
     def _ensure_throttler(self) -> bool:
         """Lazily create and set up the BandwidthThrottler.  Returns True on success."""

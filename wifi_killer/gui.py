@@ -700,18 +700,22 @@ class _Sidebar(ctk.CTkFrame):
         (None, [
             ("dashboard",    "📊   Dashboard"),
         ]),
-        ("DISCOVERY", [
+        ("RECONNAISSANCE", [
             ("scan",         "🔍   Scan Network"),
-            ("network_map",  "🗺️    Network Map"),
             ("multi_subnet", "🌐   Multi-Subnet"),
+            ("network_map",  "🗺️    Network Map"),
+        ]),
+        ("MONITORING", [
+            ("ping_monitor", "🏓   Ping Monitor"),
             ("dns_sniffer",  "🔎   DNS Sniffer"),
             ("arp_cache",    "📋   ARP Cache"),
-            ("ping_monitor", "🏓   Ping Monitor"),
         ]),
-        ("CONTROL", [
-            ("throttle",     "🚦   Speed Control"),
-            ("attack",       "⚡   ARP Attack"),
+        ("ATTACK SUITE", [
+            ("attack",       "⚡   ARP & MITM"),
             ("mitm_inspect", "🔭   MITM Inspector"),
+        ]),
+        ("UTILITIES", [
+            ("throttle",     "🚦   Speed Control"),
             ("anonymize",    "🎭   MAC Anonymize"),
             ("wol",          "🔆   Wake-on-LAN"),
         ]),
@@ -2068,6 +2072,7 @@ class AttackFrame(ctk.CTkFrame):
         self._mdns_spoofer = None
         self._ntp_spoofer = None
         self._pcap_recorder = None
+        self._dhcp_spoofer = None
         # Live activity badges on each target row (keyed by victim IP).
         # Populated only while the MITM Inspector is running.
         self._row_activity_labels: dict[str, ctk.CTkLabel] = {}
@@ -2083,6 +2088,7 @@ class AttackFrame(ctk.CTkFrame):
         self._opt_mdns = tk.BooleanVar(value=False)
         self._opt_ntp_spoof = tk.BooleanVar(value=False)
         self._opt_pcap = tk.BooleanVar(value=False)
+        self._opt_dhcp = tk.BooleanVar(value=False)
         # Inputs for the new modules.
         self._mdns_pattern_var = tk.StringVar(value="*")  # all .local by default
         self._ntp_offset_var = tk.StringVar(value="3600")  # +1h default
@@ -2444,6 +2450,15 @@ class AttackFrame(ctk.CTkFrame):
             self._opt_pcap, row=6,
         )
         self._build_pcap_subcard(pcap_card)
+
+        # 8) DHCP Spoofer — rogue DHCP responder. Races the real server.
+        card(
+            "📡", "Rogue DHCP Server",
+            "Race the legit DHCP server to hand out our IP as the "
+            "DNS server / default gateway — RFC 2131 DHCPOFFER. "
+            "Pairs naturally with the DNS Spoofer.",
+            self._opt_dhcp, row=7,
+        )
 
     def _build_rule_subcard(
         self, parent, title: str, add_cb, holder_attr: str,
@@ -3067,6 +3082,8 @@ class AttackFrame(ctk.CTkFrame):
                 self._app.log(
                     "PCAP Recorder skipped — no output path set.", "warn",
                 )
+        if self._opt_dhcp.get():
+            self._start_dhcp_spoofer()
         # Tell the network map to repaint with attack styling now that
         # ``app.get_attack_info()`` will return a live snapshot.
         self._app.mark_attack_changed()
@@ -3205,6 +3222,35 @@ class AttackFrame(ctk.CTkFrame):
             self._pcap_recorder = None
             self._app.log(f"PCAP Recorder failed: {exc}", "err")
 
+    def _start_dhcp_spoofer(self) -> None:
+        """Start a rogue DHCP responder that hands out our IP as DNS/gateway."""
+        try:
+            from wifi_killer.modules.dhcp_spoofer import DHCPSpoofer
+            own_ip = self._app._get_own_ip()
+            if not own_ip or own_ip in ("?", ""):
+                raise RuntimeError("Local IP unknown — pick an interface first.")
+            own_mac = (get_interface_mac(self._app._iface) or "")
+            if not own_mac:
+                raise RuntimeError("Could not resolve attacker MAC.")
+            subnet = get_interface_subnet(self._app._iface) or f"{own_ip}/24"
+            self._dhcp_spoofer = DHCPSpoofer(
+                self._app._iface,
+                server_ip=own_ip,
+                server_mac=own_mac,
+                subnet=subnet,
+                dns_ip=own_ip,
+                gateway_ip=own_ip,
+            )
+            self._dhcp_spoofer.start()
+            self._app.log(
+                f"Rogue DHCP Server running on {subnet} → "
+                f"DNS={own_ip}, GW={own_ip}",
+                "warn",
+            )
+        except Exception as exc:
+            self._dhcp_spoofer = None
+            self._app.log(f"Rogue DHCP Server failed: {exc}", "err")
+
     def _stop_attack(self) -> None:
         if not self._running:
             return
@@ -3287,6 +3333,17 @@ class AttackFrame(ctk.CTkFrame):
             except Exception:
                 pass
             self._pcap_recorder = None
+        if self._dhcp_spoofer is not None:
+            try:
+                hits = self._dhcp_spoofer.hits
+                self._dhcp_spoofer.stop()
+                self._app.log(
+                    f"Rogue DHCP stopped — answered {hits} client request(s).",
+                    "ok",
+                )
+            except Exception:
+                pass
+            self._dhcp_spoofer = None
         self._running = False
         self._start_btn.configure(state="normal", text="⚡   Launch Attack")
         self._stop_btn.configure(state="disabled")
@@ -3430,6 +3487,9 @@ class AttackFrame(ctk.CTkFrame):
             bits.append(
                 f"💾 PCAP: {snap['packets_written']:,} pkt · {kb:.0f} KB"
             )
+        if self._dhcp_spoofer is not None:
+            snap = self._dhcp_spoofer.snapshot()
+            bits.append(f"📡 DHCP: {snap['hits']} offers")
         self._companion_label.configure(text="    ·    ".join(bits))
 
         self._timer_id = self.after(1000, self._tick)
@@ -3448,16 +3508,10 @@ class AnonymizeFrame(ctk.CTkFrame):
     def _build(self) -> None:
         self.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
-            self, text="🎭  MAC Address Anonymization",
-            font=_FONT_TITLE, text_color=_CLR_ACCENT,
-        ).grid(row=0, column=0, padx=28, pady=(24, 4), sticky="w")
-
-        ctk.CTkLabel(
-            self,
-            text="Change your interface MAC address to avoid identification on the local network.",
-            font=_FONT_SMALL, text_color=_CLR_MUTED,
-        ).grid(row=1, column=0, padx=28, pady=(0, 16), sticky="w")
+        _page_header(
+            self, icon="🎭", title="MAC Anonymization",
+            subtitle="Change your interface MAC to avoid identification on the local network",
+        ).grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 14))
 
         panel = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
         panel.grid(row=2, column=0, padx=28, pady=0, sticky="ew")
@@ -3599,16 +3653,10 @@ class SettingsFrame(ctk.CTkFrame):
     def _build(self) -> None:
         self.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
-            self, text="⚙️  Attack Speed / Intensity",
-            font=_FONT_TITLE, text_color=_CLR_ACCENT,
-        ).grid(row=0, column=0, padx=28, pady=(24, 4), sticky="w")
-
-        ctk.CTkLabel(
-            self,
-            text="Control how frequently and aggressively ARP spoof packets are sent.",
-            font=_FONT_SMALL, text_color=_CLR_MUTED,
-        ).grid(row=1, column=0, padx=28, pady=(0, 16), sticky="w")
+        _page_header(
+            self, icon="⚙️", title="Attack Speed & Intensity",
+            subtitle="Control how frequently and aggressively ARP spoof packets are sent",
+        ).grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 14))
 
         # Preset buttons
         preset_frame = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
@@ -3973,16 +4021,10 @@ class PingMonitorFrame(ctk.CTkFrame):
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
-            self, text="🏓  Ping Monitor",
-            font=_FONT_TITLE, text_color=_CLR_ACCENT,
-        ).grid(row=0, column=0, padx=28, pady=(22, 2), sticky="w")
-
-        ctk.CTkLabel(
-            self,
-            text="Continuously probe hosts with ICMP echo and display round-trip latency.",
-            font=_FONT_SMALL, text_color=_CLR_MUTED,
-        ).grid(row=1, column=0, padx=28, pady=(0, 10), sticky="w")
+        _page_header(
+            self, icon="🏓", title="Ping Monitor",
+            subtitle="Continuously probe hosts with ICMP echo and watch round-trip latency",
+        ).grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 12))
 
         # Controls
         ctrl = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
@@ -4218,18 +4260,10 @@ class MultiSubnetFrame(ctk.CTkFrame):
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # Title
-        ctk.CTkLabel(
-            self, text="🌐  Multi-Subnet Discovery",
-            font=_FONT_TITLE, text_color=_CLR_ACCENT,
-        ).grid(row=0, column=0, padx=28, pady=(22, 2), sticky="w")
-
-        ctk.CTkLabel(
-            self,
-            text="Automatically detect and scan multiple network segments to find "
-                 "devices across different subnets.",
-            font=_FONT_SMALL, text_color=_CLR_MUTED,
-        ).grid(row=1, column=0, padx=28, pady=(0, 10), sticky="w")
+        _page_header(
+            self, icon="🌐", title="Multi-Subnet Discovery",
+            subtitle="Auto-detect and scan multiple network segments to find hosts across subnets",
+        ).grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 12))
 
         # ── Body split: left (subnet list) + right (controls + results) ──
         body = ctk.CTkFrame(self, fg_color="transparent")
@@ -4587,26 +4621,22 @@ class NetworkMapFrame(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
 
         # ── Header ────────────────────────────────────────────────────
-        hdr = ctk.CTkFrame(self, fg_color="transparent")
-        hdr.grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 8))
-        hdr.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            hdr, text="🗺️  Network Map",
-            font=_FONT_TITLE, text_color=_CLR_ACCENT,
-        ).grid(row=0, column=0, sticky="w")
+        hdr = _page_header(
+            self, icon="🗺️", title="Network Map",
+            subtitle="Hub-and-spoke topology — gateway in the centre, this device + clients around it",
+        )
+        hdr.grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 12))
 
         self._lbl_count = ctk.CTkLabel(
-            hdr, text="No hosts loaded – run a scan first.",
+            hdr.right_slot, text="No hosts loaded – run a scan first.",
             font=_FONT_SMALL, text_color=_CLR_MUTED,
         )
-        self._lbl_count.grid(row=0, column=1, sticky="e")
+        self._lbl_count.pack(side="right", padx=(0, 12))
 
-        ctk.CTkButton(
-            hdr, text="🔄  Refresh", width=110, height=30,
-            fg_color=_CLR_PANEL, hover_color=_CLR_ACCENT2,
-            font=_FONT_LABEL, command=self.request_topology_refresh,
-        ).grid(row=0, column=2, padx=(12, 0), sticky="e")
+        _ghost_button(
+            hdr.right_slot, text="🔄  Refresh", width=110, height=32,
+            command=self.request_topology_refresh, font=_FONT_SMALL,
+        ).pack(side="right")
 
         # ── Canvas ────────────────────────────────────────────────────
         self._canvas = tk.Canvas(
@@ -5214,17 +5244,10 @@ class ThrottleFrame(ctk.CTkFrame):
         self.grid_rowconfigure(4, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
-            self, text="🚦  Client Speed Control",
-            font=_FONT_TITLE, text_color=_CLR_ACCENT,
-        ).grid(row=0, column=0, padx=28, pady=(22, 2), sticky="w")
-
-        ctk.CTkLabel(
-            self,
-            text="Rate-limit a client's download and upload speed using Linux tc HTB.\n"
-                 "Requires an active ARP MITM session so traffic flows through this machine.",
-            font=_FONT_SMALL, text_color=_CLR_MUTED, justify="left",
-        ).grid(row=1, column=0, padx=28, pady=(0, 12), sticky="w")
+        _page_header(
+            self, icon="🚦", title="Speed Control",
+            subtitle="Rate-limit a victim's download / upload via Linux tc HTB (requires an active MITM)",
+        ).grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 12))
 
         # ── Target selector card ──────────────────────────────────────
         sel_card = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
@@ -5571,20 +5594,10 @@ class WolFrame(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
 
         # ── Header ────────────────────────────────────────────────────
-        hdr = ctk.CTkFrame(self, fg_color="transparent")
-        hdr.grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 8))
-        hdr.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            hdr, text="🔆  Wake-on-LAN",
-            font=_FONT_TITLE, text_color=_CLR_ACCENT,
-        ).grid(row=0, column=0, sticky="w")
-
-        ctk.CTkLabel(
-            hdr,
-            text="Power on devices remotely by sending a magic packet.",
-            font=_FONT_LABEL, text_color=_CLR_MUTED,
-        ).grid(row=1, column=0, sticky="w")
+        _page_header(
+            self, icon="🔆", title="Wake-on-LAN",
+            subtitle="Power on devices remotely by sending a magic packet",
+        ).grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 12))
 
         # ── Body ──────────────────────────────────────────────────────
         body = ctk.CTkFrame(self, fg_color="transparent")
@@ -5868,16 +5881,10 @@ class DnsSnifferFrame(ctk.CTkFrame):
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
-            self, text="🔎  DNS Sniffer",
-            font=_FONT_TITLE, text_color=_CLR_ACCENT,
-        ).grid(row=0, column=0, padx=28, pady=(24, 4), sticky="w")
-
-        ctk.CTkLabel(
-            self,
-            text="Capture DNS queries flowing through the network (requires active MITM or monitor mode).",
-            font=_FONT_SMALL, text_color=_CLR_MUTED,
-        ).grid(row=1, column=0, padx=28, pady=(0, 12), sticky="w")
+        _page_header(
+            self, icon="🔎", title="DNS Sniffer",
+            subtitle="Capture DNS queries flowing through the network (requires active MITM or monitor mode)",
+        ).grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 12))
 
         # Controls
         ctrl = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
@@ -6049,16 +6056,10 @@ class ArpCacheFrame(ctk.CTkFrame):
         self.grid_rowconfigure(3, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
-            self, text="📋  ARP Cache Viewer",
-            font=_FONT_TITLE, text_color=_CLR_ACCENT,
-        ).grid(row=0, column=0, padx=28, pady=(24, 4), sticky="w")
-
-        ctk.CTkLabel(
-            self,
-            text="View the system ARP table and detect potential ARP cache poisoning.",
-            font=_FONT_SMALL, text_color=_CLR_MUTED,
-        ).grid(row=1, column=0, padx=28, pady=(0, 12), sticky="w")
+        _page_header(
+            self, icon="📋", title="ARP Cache Viewer",
+            subtitle="View the system ARP table and detect potential poisoning (duplicate MACs)",
+        ).grid(row=0, column=0, sticky="ew", padx=28, pady=(22, 12))
 
         # Controls
         ctrl = ctk.CTkFrame(self, fg_color=_CLR_SIDEBAR, corner_radius=12)
